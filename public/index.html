@@ -3,380 +3,125 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Free Bookmap + Chart - Live Trading</title>
+  <title>Free Bookmap - Live Trading Heatmap</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    
-    body {
-      background: #0a0a0f;
-      color: #e0e0e0;
-      font-family: 'Courier New', monospace;
-      overflow: hidden;
-      height: 100vh;
-    }
+    body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; overflow: hidden; height: 100vh; }
 
-    /* ═══ TOP BAR ═══ */
-    #topBar {
-      display: flex;
-      align-items: center;
-      padding: 6px 12px;
-      background: #111118;
-      border-bottom: 1px solid #2a2a3a;
-      height: 44px;
-      gap: 12px;
-    }
+    #topBar { display: flex; align-items: center; padding: 5px 10px; background: #111118; border-bottom: 1px solid #2a2a3a; height: 40px; gap: 10px; }
+    .logo { font-size: 12px; font-weight: bold; color: #00e5ff; letter-spacing: 1px; }
+    .btn-group { display: flex; gap: 3px; }
+    .btn { padding: 3px 9px; background: #1a1a2e; border: 1px solid #333; color: #888; border-radius: 3px; cursor: pointer; font-size: 10px; font-family: inherit; transition: all 0.15s; }
+    .btn:hover { border-color: #00e5ff; color: #fff; }
+    .btn.active { background: #00344a; border-color: #00e5ff; color: #00e5ff; }
+    .btn.tf { border-color: #444; }
+    .btn.tf.active { background: #3a2a00; border-color: #ffaa00; color: #ffaa00; }
+    .sep { width: 1px; height: 20px; background: #333; margin: 0 4px; }
+    .price-area { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+    .countdown { font-size: 10px; color: #ffaa00; background: #1a1500; padding: 2px 8px; border-radius: 3px; border: 1px solid #4a3500; }
+    .price-val { font-size: 16px; font-weight: bold; }
 
-    .logo {
-      font-size: 12px;
-      font-weight: bold;
-      color: #00e5ff;
-      letter-spacing: 1px;
-      white-space: nowrap;
-    }
+    #main { display: grid; grid-template-columns: 1fr 240px; height: calc(100vh - 40px - 18px); }
+    #chartArea { position: relative; overflow: hidden; }
+    #chartCanvas { display: block; width: 100%; height: 100%; }
 
-    .instruments {
-      display: flex;
-      gap: 4px;
-    }
+    #rightPanel { background: #0d0d15; border-left: 1px solid #1a1a2e; display: flex; flex-direction: column; overflow: hidden; font-size: 9px; }
+    .section { padding: 6px 8px; border-bottom: 1px solid #1a1a2e; }
+    .section-title { font-size: 9px; color: #00e5ff; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; font-weight: bold; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+    .stat { display: flex; justify-content: space-between; }
+    .stat-l { color: #555; }
+    .stat-v { font-weight: bold; }
+    .green { color: #26a69a; }
+    .red { color: #ef5350; }
 
-    .inst-btn {
-      padding: 3px 10px;
-      background: #1a1a2e;
-      border: 1px solid #333355;
-      color: #aaa;
-      border-radius: 3px;
-      cursor: pointer;
-      font-size: 10px;
-      font-family: 'Courier New', monospace;
-      transition: all 0.15s;
-    }
-    .inst-btn:hover { border-color: #00e5ff; color: #fff; }
-    .inst-btn.active { background: #00344a; border-color: #00e5ff; color: #00e5ff; }
+    #domLadder { flex: 1; overflow-y: auto; padding: 4px; }
+    .dom-row { display: grid; grid-template-columns: 60px 1fr 60px; height: 16px; align-items: center; position: relative; }
+    .dom-bid { text-align: right; color: #26a69a; padding-right: 4px; z-index: 1; }
+    .dom-ask { text-align: left; color: #ef5350; padding-left: 4px; z-index: 1; }
+    .dom-price { text-align: center; color: #aaa; z-index: 1; font-weight: bold; }
+    .dom-bar-bid { position: absolute; right: 50%; height: 14px; background: rgba(38,166,154,0.15); border-right: 1px solid rgba(38,166,154,0.4); }
+    .dom-bar-ask { position: absolute; left: 50%; height: 14px; background: rgba(239,83,80,0.15); border-left: 1px solid rgba(239,83,80,0.4); }
 
-    /* Timeframe buttons */
-    .timeframes {
-      display: flex;
-      gap: 3px;
-      margin-left: 8px;
-      padding-left: 8px;
-      border-left: 1px solid #333;
-    }
+    #eventsLog { height: 160px; overflow-y: auto; padding: 4px; }
+    .ev { padding: 1px 4px; margin-bottom: 1px; border-left: 2px solid #333; background: #0f0f18; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ev.buy { border-left-color: #00e676; color: #00e676; }
+    .ev.sell { border-left-color: #ff1744; color: #ff1744; }
+    .ev.pull { border-left-color: #ffab00; color: #ffab00; }
+    .ev.stack { border-left-color: #7c4dff; color: #7c4dff; }
+    .ev.ice { border-left-color: #00e5ff; color: #00e5ff; }
 
-    .tf-btn {
-      padding: 3px 8px;
-      background: #1a1a2e;
-      border: 1px solid #2a2a44;
-      color: #888;
-      border-radius: 3px;
-      cursor: pointer;
-      font-size: 10px;
-      font-family: 'Courier New', monospace;
-      transition: all 0.15s;
-    }
-    .tf-btn:hover { border-color: #ffaa00; color: #fff; }
-    .tf-btn.active { background: #3a2a00; border-color: #ffaa00; color: #ffaa00; }
+    .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+    .leg { display: flex; align-items: center; gap: 3px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; }
 
-    /* Zoom controls */
-    .zoom-controls {
-      display: flex;
-      gap: 4px;
-      margin-left: 8px;
-      padding-left: 8px;
-      border-left: 1px solid #333;
-    }
-
-    .zoom-btn {
-      padding: 2px 8px;
-      background: #1a1a2e;
-      border: 1px solid #333;
-      color: #aaa;
-      border-radius: 3px;
-      cursor: pointer;
-      font-size: 12px;
-      font-family: 'Courier New', monospace;
-    }
-    .zoom-btn:hover { background: #2a2a3e; color: #fff; }
-
-    /* Price + countdown */
-    .price-area {
-      margin-left: auto;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-    }
-
-    .countdown {
-      font-size: 11px;
-      color: #ffaa00;
-      background: #1a1500;
-      padding: 3px 8px;
-      border-radius: 3px;
-      border: 1px solid #4a3500;
-    }
-
-    .price-display {
-      text-align: right;
-    }
-    .price-display .label { font-size: 9px; color: #555; }
-    .price-display .value { font-size: 16px; font-weight: bold; color: #fff; }
-
-    /* ═══ MAIN LAYOUT ═══ */
-    #mainLayout {
-      display: grid;
-      grid-template-columns: 1fr 260px;
-      height: calc(100vh - 44px - 20px);
-    }
-
-    /* ═══ CHART AREA ═══ */
-    #chartArea {
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      position: relative;
-    }
-
-    /* Candlestick + Heatmap canvas */
-    #chartCanvas {
-      flex: 1;
-      display: block;
-    }
-
-    /* Volume canvas */
-    #volumeCanvas {
-      height: 80px;
-      display: block;
-      border-top: 1px solid #1a1a2e;
-    }
-
-    /* ═══ RIGHT PANEL ═══ */
-    #rightPanel {
-      background: #0d0d15;
-      border-left: 1px solid #1a1a2e;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    .panel-section {
-      padding: 8px;
-      border-bottom: 1px solid #1a1a2e;
-    }
-
-    .panel-title {
-      font-size: 10px;
-      color: #00e5ff;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-bottom: 6px;
-      font-weight: bold;
-    }
-
-    /* DOM Ladder */
-    #domLadder {
-      flex: 1;
-      overflow-y: auto;
-      padding: 4px;
-    }
-
-    .dom-row {
-      display: grid;
-      grid-template-columns: 70px 1fr 70px;
-      align-items: center;
-      height: 18px;
-      font-size: 9px;
-      position: relative;
-    }
-
-    .dom-row .bid-bar {
-      position: absolute;
-      right: 50%;
-      height: 16px;
-      background: rgba(0, 200, 83, 0.15);
-      border-right: 1px solid rgba(0, 200, 83, 0.4);
-    }
-
-    .dom-row .ask-bar {
-      position: absolute;
-      left: 50%;
-      height: 16px;
-      background: rgba(255, 53, 71, 0.15);
-      border-left: 1px solid rgba(255, 53, 71, 0.4);
-    }
-
-    .dom-row .price-cell { text-align: center; z-index: 1; font-weight: bold; color: #ccc; }
-    .dom-row .qty-bid { text-align: right; color: #00c853; z-index: 1; padding-right: 4px; }
-    .dom-row .qty-ask { text-align: left; color: #ff3547; z-index: 1; padding-left: 4px; }
-    .dom-row.spread-row { background: #1a1a2e; justify-content: center; }
-
-    /* Events */
-    #eventsLog {
-      height: 180px;
-      overflow-y: auto;
-      padding: 4px;
-      font-size: 9px;
-    }
-
-    .event-item {
-      padding: 2px 5px;
-      margin-bottom: 1px;
-      border-radius: 2px;
-      background: #0f0f18;
-      border-left: 3px solid #333;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .event-item.agg-buy { border-left-color: #00e676; color: #00e676; }
-    .event-item.agg-sell { border-left-color: #ff1744; color: #ff1744; }
-    .event-item.pull { border-left-color: #ffab00; color: #ffab00; }
-    .event-item.stack { border-left-color: #7c4dff; color: #7c4dff; }
-    .event-item.iceberg { border-left-color: #00e5ff; color: #00e5ff; }
-
-    /* Stats */
-    #statsPanel {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 3px;
-      font-size: 9px;
-    }
-
-    .stat-row { display: flex; justify-content: space-between; }
-    .stat-label { color: #555; }
-    .stat-val { font-weight: bold; }
-    .stat-val.green { color: #00c853; }
-    .stat-val.red { color: #ff3547; }
-
-    /* Legend */
-    #legend {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 2px;
-      font-size: 8px;
-    }
-
-    .legend-item { display: flex; align-items: center; gap: 3px; }
-    .legend-dot { width: 7px; height: 7px; border-radius: 2px; }
-
-    /* ═══ STATUS BAR ═══ */
-    #statusBar {
-      height: 20px;
-      background: #111118;
-      border-top: 1px solid #222;
-      display: flex;
-      align-items: center;
-      padding: 0 12px;
-      font-size: 9px;
-      color: #444;
-      gap: 16px;
-    }
-
-    .status-dot {
-      width: 6px; height: 6px;
-      border-radius: 50%;
-      background: #ff3547;
-      display: inline-block;
-      margin-right: 4px;
-    }
+    #statusBar { height: 18px; background: #111118; border-top: 1px solid #222; display: flex; align-items: center; padding: 0 10px; font-size: 9px; color: #444; gap: 14px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #ff3547; display: inline-block; margin-right: 3px; }
     .status-dot.on { background: #00e676; }
 
-    /* Scrollbar */
     ::-webkit-scrollbar { width: 3px; }
     ::-webkit-scrollbar-track { background: #0a0a0f; }
     ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
-
-    /* Crosshair tooltip */
-    #crosshairInfo {
-      position: fixed;
-      background: rgba(20, 20, 30, 0.95);
-      border: 1px solid #333;
-      padding: 4px 8px;
-      font-size: 9px;
-      border-radius: 3px;
-      pointer-events: none;
-      display: none;
-      z-index: 1000;
-      white-space: nowrap;
-    }
   </style>
 </head>
 <body>
-  <!-- TOP BAR -->
   <div id="topBar">
-    <div class="logo">BOOKMAP PRO</div>
-    <div class="instruments" id="instrumentBtns"></div>
-    <div class="timeframes" id="timeframeBtns"></div>
-    <div class="zoom-controls">
-      <button class="zoom-btn" id="zoomIn">+</button>
-      <button class="zoom-btn" id="zoomOut">−</button>
-      <button class="zoom-btn" id="zoomReset">⟲</button>
-    </div>
+    <div class="logo">BOOKMAP</div>
+    <div class="btn-group" id="instBtns"></div>
+    <div class="sep"></div>
+    <div class="btn-group" id="tfBtns"></div>
+    <div class="sep"></div>
+    <button class="btn" id="zoomIn">+</button>
+    <button class="btn" id="zoomOut">-</button>
+    <button class="btn" id="zoomReset">R</button>
     <div class="price-area">
-      <div class="countdown" id="countdown">Next close: --:--</div>
-      <div class="price-display">
-        <div class="label">LAST</div>
-        <div class="value" id="priceValue">--</div>
-      </div>
+      <div class="countdown" id="countdown">--:--</div>
+      <div class="price-val" id="priceVal">--</div>
     </div>
   </div>
 
-  <!-- MAIN -->
-  <div id="mainLayout">
-    <div id="chartArea">
-      <canvas id="chartCanvas"></canvas>
-      <canvas id="volumeCanvas"></canvas>
-    </div>
-
+  <div id="main">
+    <div id="chartArea"><canvas id="chartCanvas"></canvas></div>
     <div id="rightPanel">
-      <div class="panel-section">
-        <div class="panel-title">Stats</div>
-        <div id="statsPanel">
-          <div class="stat-row"><span class="stat-label">Bid Vol</span><span class="stat-val green" id="sBidVol">0</span></div>
-          <div class="stat-row"><span class="stat-label">Ask Vol</span><span class="stat-val red" id="sAskVol">0</span></div>
-          <div class="stat-row"><span class="stat-label">Buy Pwr</span><span class="stat-val green" id="sBuyPwr">0</span></div>
-          <div class="stat-row"><span class="stat-label">Sell Pwr</span><span class="stat-val red" id="sSellPwr">0</span></div>
-          <div class="stat-row"><span class="stat-label">Spread</span><span class="stat-val" id="sSpread">0</span></div>
-          <div class="stat-row"><span class="stat-label">Imbal</span><span class="stat-val" id="sImbal">0%</span></div>
+      <div class="section">
+        <div class="section-title">Stats</div>
+        <div class="stats">
+          <div class="stat"><span class="stat-l">Bid</span><span class="stat-v green" id="sBid">0</span></div>
+          <div class="stat"><span class="stat-l">Ask</span><span class="stat-v red" id="sAsk">0</span></div>
+          <div class="stat"><span class="stat-l">BuyPwr</span><span class="stat-v green" id="sBuy">0</span></div>
+          <div class="stat"><span class="stat-l">SellPwr</span><span class="stat-v red" id="sSell">0</span></div>
+          <div class="stat"><span class="stat-l">Spread</span><span class="stat-v" id="sSpread">0</span></div>
+          <div class="stat"><span class="stat-l">Imbal</span><span class="stat-v" id="sImbal">0%</span></div>
         </div>
       </div>
-
-      <div class="panel-section" style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
-        <div class="panel-title">DOM (Depth)</div>
+      <div class="section" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+        <div class="section-title">DOM</div>
         <div id="domLadder"></div>
       </div>
-
-      <div class="panel-section" style="height:200px;">
-        <div class="panel-title">Order Flow Events</div>
+      <div class="section" style="height:180px">
+        <div class="section-title">Events</div>
         <div id="eventsLog"></div>
       </div>
-
-      <div class="panel-section">
-        <div class="panel-title">Legend</div>
-        <div id="legend">
-          <div class="legend-item"><div class="legend-dot" style="background:#00c853"></div>Bid Liq.</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#ff3547"></div>Ask Liq.</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#ffaa00"></div>Price</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#00e5ff"></div>Iceberg</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#7c4dff"></div>Stacking</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#ffab00"></div>Pulling</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#00e676"></div>Agg Buy</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#ff1744"></div>Agg Sell</div>
+      <div class="section">
+        <div class="section-title">Legend</div>
+        <div class="legend">
+          <div class="leg"><div class="dot" style="background:#26a69a"></div>Buy dot</div>
+          <div class="leg"><div class="dot" style="background:#ef5350"></div>Sell dot</div>
+          <div class="leg"><div class="dot" style="background:#00c853"></div>Bid liq</div>
+          <div class="leg"><div class="dot" style="background:#ff3547"></div>Ask liq</div>
+          <div class="leg"><div class="dot" style="background:#ffaa00"></div>Price</div>
+          <div class="leg"><div class="dot" style="background:#7c4dff"></div>Stack</div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- STATUS -->
   <div id="statusBar">
-    <span><span class="status-dot" id="connDot"></span><span id="connText">Connecting...</span></span>
-    <span id="sInstrument">--</span>
-    <span id="sTimeframe">1m</span>
-    <span id="sUpdates">0/s</span>
-    <span id="sCandles">0 candles</span>
+    <span><span class="status-dot" id="sDot"></span><span id="sConn">Connecting</span></span>
+    <span id="sInst">--</span>
+    <span id="sTf">1m</span>
+    <span id="sInfo">Loading...</span>
   </div>
-
-  <!-- Crosshair tooltip -->
-  <div id="crosshairInfo"></div>
 
   <script src="app.js"></script>
 </body>
