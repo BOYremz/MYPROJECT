@@ -1,0 +1,16 @@
+{
+  "name": "free-bookmap-heatmap",
+  "version": "1.0.0",
+  "description": "Free Bookmap-style trading heatmap with live market data - Gold/XAUUSD, Nasdaq/US100, Forex",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0"
+  },
+  "keywords": ["bookmap", "heatmap", "trading", "order-book", "liquidity", "forex", "gold", "nasdaq"],
+  "license": "MIT"
+}
