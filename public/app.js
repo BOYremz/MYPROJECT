@@ -160,19 +160,15 @@ function render() {
   }
 
   // ══════════════════════════════════════════════════════════════
-  // LIQUIDITY HEATMAP (behind candles)
+  // LIQUIDITY HEATMAP (behind candles - FULL WIDTH)
   // Shows where passive buyers/sellers are sitting
-  // Thick bands = lots of orders = support/resistance
+  // Painted across the ENTIRE chart so it's always visible
   // ══════════════════════════════════════════════════════════════
   
   // Find max order size for color scaling
   let maxQ = 1;
   Object.values(S.orderBook.bids).forEach(q => { if (q > maxQ) maxQ = q; });
   Object.values(S.orderBook.asks).forEach(q => { if (q > maxQ) maxQ = q; });
-  S.domHistory.forEach(snap => {
-    Object.values(snap.bids).forEach(q => { if (q > maxQ) maxQ = q; });
-    Object.values(snap.asks).forEach(q => { if (q > maxQ) maxQ = q; });
-  });
 
   // Calculate how thick each band should be (based on price level spacing)
   const prices = [...Object.keys(S.orderBook.bids), ...Object.keys(S.orderBook.asks)].map(Number).sort((a,b)=>a-b);
@@ -181,49 +177,13 @@ function render() {
     const gap = prices[i] - prices[i-1];
     if (gap > 0 && gap < tickSize) tickSize = gap;
   }
-  const bandH = Math.max(3, Math.min(12, (tickSize / priceRange) * chartH));
+  const bandH = Math.max(4, Math.min(14, (tickSize / priceRange) * chartH));
 
-  // Draw DOM history snapshots as heatmap columns
-  const snapshots = S.domHistory.filter(s => s.time >= tStart && s.time <= tEnd + tRange*0.2);
+  // Paint current order book as FULL-WIDTH horizontal bands
+  // This is the key: liquidity bands span the ENTIRE chart width
+  // so they're always visible regardless of zoom or scroll
   
-  if (snapshots.length > 0) {
-    const colWidth = candleArea / Math.max(1, snapshots.length);
-    
-    snapshots.forEach((snap, idx) => {
-      const x = (snapshots.length < 5) 
-        ? idx * colWidth 
-        : ((snap.time - tStart) / tRange) * candleArea;
-      
-      const w = Math.max(2, colWidth + 1);
-
-      // BIDS = passive buyers below price (support)
-      Object.entries(snap.bids).forEach(([p, q]) => {
-        const price = +p;
-        if (price < lo || price > hi) return;
-        const y = ((hi - price) / priceRange) * chartH;
-        const strength = q / maxQ;
-        if (strength < 0.03) return;
-        ctx.fillStyle = liquidityColor(strength);
-        ctx.fillRect(x, y - bandH/2, w, bandH);
-      });
-
-      // ASKS = passive sellers above price (resistance)
-      Object.entries(snap.asks).forEach(([p, q]) => {
-        const price = +p;
-        if (price < lo || price > hi) return;
-        const y = ((hi - price) / priceRange) * chartH;
-        const strength = q / maxQ;
-        if (strength < 0.03) return;
-        ctx.fillStyle = liquidityColor(strength);
-        ctx.fillRect(x, y - bandH/2, w, bandH);
-      });
-    });
-  }
-
-  // Draw CURRENT order book as live liquidity (right side, brighter)
-  const liveX = candleArea * 0.6;
-  const liveW = candleArea * 0.4 + rightPad;
-  
+  // BIDS = passive buyers below price (GREEN support zones)
   Object.entries(S.orderBook.bids).forEach(([p, q]) => {
     const price = +p;
     if (price < lo || price > hi) return;
@@ -231,9 +191,11 @@ function render() {
     const strength = q / maxQ;
     if (strength < 0.03) return;
     ctx.fillStyle = liquidityColor(strength);
-    ctx.fillRect(liveX, y - bandH/2, liveW, bandH);
+    // Full width band from left edge to right edge
+    ctx.fillRect(0, y - bandH/2, drawW, bandH);
   });
   
+  // ASKS = passive sellers above price (RED resistance zones)
   Object.entries(S.orderBook.asks).forEach(([p, q]) => {
     const price = +p;
     if (price < lo || price > hi) return;
@@ -241,7 +203,8 @@ function render() {
     const strength = q / maxQ;
     if (strength < 0.03) return;
     ctx.fillStyle = liquidityColor(strength);
-    ctx.fillRect(liveX, y - bandH/2, liveW, bandH);
+    // Full width band from left edge to right edge
+    ctx.fillRect(0, y - bandH/2, drawW, bandH);
   });
 
   // ══════════════════════════════════════════════════════════════
