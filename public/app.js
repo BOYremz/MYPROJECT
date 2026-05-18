@@ -1,9 +1,7 @@
 /**
- * REAL BOOKMAP CLONE
- * - Heatmap: horizontal bands of liquidity colored by intensity
- * - Price line: yellow line moving through time
- * - Volume bubbles: green/red dots for trades
- * - DOM ladder, timeframes, zoom
+ * BOOKMAP PRO - TradingView-style candles + Heatmap liquidity bands
+ * Smooth zoom/scroll like TradingView
+ * Volume bubbles + Best Bid/Offer tracking
  */
 
 const S = {
@@ -12,16 +10,20 @@ const S = {
   timeframes: [], currentPrice: 0,
   orderBook: { bids: {}, asks: {} },
   candles: [], trades: [], events: [], domHistory: [],
-  zoom: 1, offset: 0,
-  dragging: false, dragStartX: 0, dragStartOff: 0,
+  // Smooth zoom & scroll (TradingView style)
+  zoom: 1, targetZoom: 1,
+  scrollX: 0, targetScrollX: 0,
+  dragging: false, dragStartX: 0, dragStartScroll: 0,
   mouse: null,
+  // Animation
+  animSpeed: 0.15,
 };
 
 const TF_MS = { '1m':60000,'5m':300000,'15m':900000,'30m':1800000,'1h':3600000,'4h':14400000,'1D':86400000 };
 const canvas = document.getElementById('chartCanvas');
 const ctx = canvas.getContext('2d');
 let W, H;
-const AXIS = 70;
+const AXIS_W = 72;
 
 function resize() {
   const a = document.getElementById('chartArea');
@@ -38,8 +40,8 @@ resize();
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   S.ws = new WebSocket(`${proto}//${location.host}`);
-  S.ws.onopen = () => { S.connected = true; updateConnUI(); };
-  S.ws.onclose = () => { S.connected = false; updateConnUI(); setTimeout(connect, 2000); };
+  S.ws.onopen = () => { S.connected = true; updateUI(); };
+  S.ws.onclose = () => { S.connected = false; updateUI(); setTimeout(connect, 2000); };
   S.ws.onerror = () => { S.connected = false; };
   S.ws.onmessage = (e) => {
     const d = JSON.parse(e.data);
@@ -50,12 +52,12 @@ function connect() {
       S.timeframes = d.timeframes || [];
       S.candles = d.candles || [];
       S.domHistory = d.domHistory || [];
-      S.orderBook = d.orderBook || { bids:{}, asks:{} };
+      S.orderBook = d.orderBook || {bids:{},asks:{}};
       S.trades = d.trades || [];
       S.events = d.events || [];
       S.currentPrice = d.currentPrice;
       S.serverConnected = d.connected;
-      buildBtns();
+      buildButtons();
     } else if (d.type === 'UPDATE') {
       S.orderBook = d.orderBook || S.orderBook;
       S.currentPrice = d.currentPrice || S.currentPrice;
@@ -74,7 +76,7 @@ function connect() {
       }
       if (d.events) {
         d.events.forEach(ev => {
-          if (!S.events.find(x => x.time === ev.time && x.type === ev.type)) S.events.push(ev);
+          if (!S.events.find(x => x.time===ev.time && x.type===ev.type)) S.events.push(ev);
         });
         if (S.events.length > 200) S.events = S.events.slice(-200);
       }
@@ -82,84 +84,87 @@ function connect() {
       S.currentInstrument = d.instrument;
       S.candles = d.candles || [];
       S.domHistory = d.domHistory || [];
-      S.orderBook = d.orderBook || { bids:{}, asks:{} };
+      S.orderBook = d.orderBook || {bids:{},asks:{}};
       S.currentPrice = d.currentPrice;
-      S.events = []; S.offset = 0;
+      S.events = []; S.scrollX = 0; S.targetScrollX = 0;
       setActive('.inst', d.instrument);
     } else if (d.type === 'TIMEFRAME_CHANGED') {
       S.currentTimeframe = d.timeframe;
       S.candles = d.candles || [];
-      S.offset = 0;
+      S.scrollX = 0; S.targetScrollX = 0;
       setActive('.tf', d.timeframe);
       document.getElementById('sTf').textContent = d.timeframe;
     }
   };
 }
+function send(o) { if (S.ws && S.ws.readyState===1) S.ws.send(JSON.stringify(o)); }
 
-function send(o) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(o)); }
+// ═══════════ SMOOTH ANIMATION ═══════════
+function lerp(a, b, t) { return a + (b - a) * t; }
 
-// ═══════════ MAIN RENDER ═══════════
+// ═══════════ MAIN RENDER LOOP ═══════════
 function render() {
+  // Smooth zoom & scroll interpolation (TradingView feel)
+  S.zoom = lerp(S.zoom, S.targetZoom, S.animSpeed);
+  S.scrollX = lerp(S.scrollX, S.targetScrollX, S.animSpeed);
+  
   ctx.clearRect(0, 0, W, H);
   
-  if (S.candles.length < 1 || S.domHistory.length < 1) {
+  if (S.candles.length < 2) {
     ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, W, H);
-    ctx.font = '14px Consolas'; ctx.fillStyle = '#00d4ff'; ctx.textAlign = 'center';
-    ctx.fillText('Loading market data...', W/2, H/2);
-    requestAnimationFrame(render);
-    return;
+    ctx.font = '15px Consolas'; ctx.fillStyle = '#58a6ff'; ctx.textAlign = 'center';
+    ctx.fillText('Loading market data...', W/2, H/2 - 10);
+    ctx.font = '11px Consolas'; ctx.fillStyle = '#484f58';
+    ctx.fillText('Waiting for candles & order book', W/2, H/2 + 14);
+    requestAnimationFrame(render); return;
   }
   
-  const drawW = W - AXIS;
+  const drawW = W - AXIS_W;
+  const volH = 60; // volume section height at bottom
+  const chartH = H - volH;
   
-  // Determine visible candles
-  const numVis = Math.max(20, Math.floor(80 / S.zoom));
-  const start = Math.max(0, S.candles.length - numVis - S.offset);
-  const end = Math.min(S.candles.length, start + numVis);
-  const visible = S.candles.slice(start, end);
-  if (visible.length === 0) { requestAnimationFrame(render); return; }
+  // Visible candle count based on zoom
+  const baseCandles = 80;
+  const numVis = Math.max(10, Math.round(baseCandles / S.zoom));
+  const scrollOffset = Math.round(S.scrollX);
+  const endIdx = Math.max(numVis, S.candles.length - scrollOffset);
+  const startIdx = Math.max(0, endIdx - numVis);
+  const visible = S.candles.slice(startIdx, endIdx);
   
-  // Price range from candles
+  if (visible.length < 2) { requestAnimationFrame(render); return; }
+  
+  // Price range
   let hi = -Infinity, lo = Infinity;
   visible.forEach(c => { hi = Math.max(hi, c.high); lo = Math.min(lo, c.low); });
-  
-  // Also include current orderbook
-  Object.keys(S.orderBook.bids).map(Number).forEach(p => { 
-    if (p > S.currentPrice * 0.99 && p < S.currentPrice * 1.01) lo = Math.min(lo, p); 
-  });
-  Object.keys(S.orderBook.asks).map(Number).forEach(p => { 
-    if (p > S.currentPrice * 0.99 && p < S.currentPrice * 1.01) hi = Math.max(hi, p); 
-  });
-  
-  const pad = (hi - lo) * 0.15 || hi * 0.001;
+  const pad = (hi - lo) * 0.12 || hi * 0.002;
   hi += pad; lo -= pad;
   const range = hi - lo || 1;
   
-  // Time range from candles
+  // Time range
   const tStart = visible[0].openTime;
   const tEnd = visible[visible.length-1].closeTime;
   const tRange = tEnd - tStart || 1;
   
+  const candleW = drawW / visible.length;
+  const bodyW = Math.max(1, candleW * 0.65);
+  
   // ─── Background ───
-  ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, drawW, H);
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, W, H);
   
   // ─── Grid ───
-  ctx.strokeStyle = 'rgba(48, 54, 61, 0.5)'; ctx.lineWidth = 0.5;
-  ctx.setLineDash([2, 4]);
-  for (let i = 0; i <= 8; i++) {
-    const y = (i/8) * H;
+  ctx.strokeStyle = '#161b22'; ctx.lineWidth = 1;
+  for (let i = 1; i <= 6; i++) {
+    const y = (i/7) * chartH;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(drawW, y); ctx.stroke();
   }
-  for (let i = 0; i <= 6; i++) {
+  for (let i = 1; i <= 5; i++) {
     const x = (i/6) * drawW;
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, chartH); ctx.stroke();
   }
-  ctx.setLineDash([]);
   
-  // ─── HEATMAP - The structured bands like real Bookmap ───
-  // Each DOM snapshot becomes a vertical column of colored pixels
-  
-  // Find max quantity across all snapshots for color scaling
+  // ─── 1. LIQUIDITY HEATMAP (behind candles) ───
+  // Draw from domHistory - each snapshot = vertical strip of colored bands
   let maxQ = 0;
   S.domHistory.forEach(snap => {
     Object.values(snap.bids).forEach(q => { if (q > maxQ) maxQ = q; });
@@ -167,218 +172,253 @@ function render() {
   });
   if (maxQ === 0) maxQ = 1;
   
-  // Build pixel-grid heatmap (price × time)
-  const gridH = Math.min(200, H); // resolution
-  const gridW = Math.min(200, drawW);
-  const cellH = H / gridH;
-  const cellW = drawW / gridW;
+  const visibleSnaps = S.domHistory.filter(s => s.time >= tStart && s.time <= tEnd);
   
-  // Map each DOM snapshot to a column
-  const timeSpan = tRange;
-  const pxStart = tStart;
-  
-  // Filter dom snapshots that fall in our time range
-  const visSnaps = S.domHistory.filter(s => s.time >= pxStart - timeSpan*0.3 && s.time <= tEnd + timeSpan*0.3);
-  
-  // Draw heatmap
-  visSnaps.forEach((snap, idx) => {
-    const x = ((snap.time - tStart) / timeSpan) * drawW;
-    if (x < -10 || x > drawW + 10) return;
+  visibleSnaps.forEach((snap, idx) => {
+    const x = ((snap.time - tStart) / tRange) * drawW;
+    const nextSnap = visibleSnaps[idx + 1];
+    const colW = nextSnap ? Math.max(2, ((nextSnap.time - snap.time) / tRange) * drawW) : candleW;
     
-    // Width per snapshot
-    let nextSnap = visSnaps[idx + 1];
-    const colW = nextSnap ? Math.max(2, ((nextSnap.time - snap.time) / timeSpan) * drawW) : 4;
-    
-    // Draw bid liquidity (below price)
+    // Bids (support below price)
     Object.entries(snap.bids).forEach(([p, q]) => {
-      const price = parseFloat(p);
+      const price = +p;
       if (price < lo || price > hi) return;
-      const y = ((hi - price) / range) * H;
+      const y = ((hi - price) / range) * chartH;
       const intensity = Math.min(q / maxQ, 1);
-      const color = bookmapColor(intensity);
-      ctx.fillStyle = color;
-      ctx.fillRect(x, y - 1, colW + 1, 3);
+      ctx.fillStyle = heatColor(intensity);
+      const bandH = Math.max(2, (range * 0.002 / range) * chartH + intensity * 4);
+      ctx.fillRect(x, y - bandH/2, colW + 0.5, bandH);
     });
     
-    // Draw ask liquidity (above price)
+    // Asks (resistance above price)
     Object.entries(snap.asks).forEach(([p, q]) => {
-      const price = parseFloat(p);
+      const price = +p;
       if (price < lo || price > hi) return;
-      const y = ((hi - price) / range) * H;
+      const y = ((hi - price) / range) * chartH;
       const intensity = Math.min(q / maxQ, 1);
-      const color = bookmapColor(intensity);
-      ctx.fillStyle = color;
-      ctx.fillRect(x, y - 1, colW + 1, 3);
+      ctx.fillStyle = heatColor(intensity);
+      const bandH = Math.max(2, (range * 0.002 / range) * chartH + intensity * 4);
+      ctx.fillRect(x, y - bandH/2, colW + 0.5, bandH);
     });
   });
   
-  // ─── PRICE LINE (yellow zigzag through candles) ───
-  ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  visible.forEach((c, i) => {
-    const x = ((c.openTime + (c.closeTime - c.openTime)/2 - tStart) / tRange) * drawW;
-    const y = ((hi - c.close) / range) * H;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  // Also draw CURRENT order book as heatmap on the right edge
+  Object.entries(S.orderBook.bids).forEach(([p, q]) => {
+    const price = +p;
+    if (price < lo || price > hi) return;
+    const y = ((hi - price) / range) * chartH;
+    const intensity = Math.min(q / maxQ, 1);
+    ctx.fillStyle = heatColor(intensity);
+    const bandH = Math.max(3, intensity * 6);
+    ctx.fillRect(drawW * 0.7, y - bandH/2, drawW * 0.3, bandH);
   });
-  ctx.stroke();
-  
-  // Glow effect on price line
-  ctx.strokeStyle = 'rgba(255, 215, 0, 0.3)'; ctx.lineWidth = 4;
-  ctx.beginPath();
-  visible.forEach((c, i) => {
-    const x = ((c.openTime + (c.closeTime - c.openTime)/2 - tStart) / tRange) * drawW;
-    const y = ((hi - c.close) / range) * H;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  Object.entries(S.orderBook.asks).forEach(([p, q]) => {
+    const price = +p;
+    if (price < lo || price > hi) return;
+    const y = ((hi - price) / range) * chartH;
+    const intensity = Math.min(q / maxQ, 1);
+    ctx.fillStyle = heatColor(intensity);
+    const bandH = Math.max(3, intensity * 6);
+    ctx.fillRect(drawW * 0.7, y - bandH/2, drawW * 0.3, bandH);
   });
-  ctx.stroke();
   
-  // Re-draw sharp line on top
-  ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5;
-  ctx.beginPath();
+  // ─── 2. CANDLESTICKS (on top of heatmap) ───
   visible.forEach((c, i) => {
-    const x = ((c.openTime + (c.closeTime - c.openTime)/2 - tStart) / tRange) * drawW;
-    const y = ((hi - c.close) / range) * H;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    const x = i * candleW + candleW / 2;
+    const isGreen = c.close >= c.open;
+    
+    const oY = ((hi - c.open) / range) * chartH;
+    const cY = ((hi - c.close) / range) * chartH;
+    const hY = ((hi - c.high) / range) * chartH;
+    const lY = ((hi - c.low) / range) * chartH;
+    
+    // Wick
+    ctx.strokeStyle = isGreen ? '#3fb950' : '#f85149';
+    ctx.lineWidth = Math.max(1, candleW * 0.12);
+    ctx.beginPath(); ctx.moveTo(x, hY); ctx.lineTo(x, lY); ctx.stroke();
+    
+    // Body
+    const top = Math.min(oY, cY);
+    const height = Math.max(1, Math.abs(cY - oY));
+    ctx.fillStyle = isGreen ? '#3fb950' : '#f85149';
+    ctx.fillRect(x - bodyW/2, top, bodyW, height);
+    
+    // Outline for visibility against heatmap
+    ctx.strokeStyle = isGreen ? 'rgba(63,185,80,0.4)' : 'rgba(248,81,73,0.4)';
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(x - bodyW/2, top, bodyW, height);
   });
-  ctx.stroke();
   
-  // ─── VOLUME BUBBLES (trades as circles on price line) ───
+  // ─── 3. VOLUME BUBBLES (trades as sized circles) ───
   if (S.trades.length > 0) {
-    const avgQty = S.trades.reduce((a,t) => a+t.qty, 0) / S.trades.length;
+    const avgQ = S.trades.reduce((a,t) => a + t.qty, 0) / S.trades.length;
     
     S.trades.forEach(t => {
       if (t.time < tStart || t.time > tEnd) return;
       if (t.price < lo || t.price > hi) return;
+      
       const x = ((t.time - tStart) / tRange) * drawW;
-      const y = ((hi - t.price) / range) * H;
-      const rel = Math.min(t.qty / avgQty, 6);
-      const r = Math.max(2, Math.min(10, rel * 2.5));
+      const y = ((hi - t.price) / range) * chartH;
+      const rel = Math.min(t.qty / (avgQ || 1), 8);
+      const r = Math.max(2, Math.min(12, rel * 2));
       
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+      // Glow
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, r * 1.5);
       if (t.isBuy) {
-        grad.addColorStop(0, 'rgba(63, 185, 80, 0.9)');
-        grad.addColorStop(1, 'rgba(63, 185, 80, 0.1)');
+        grad.addColorStop(0, 'rgba(63, 185, 80, 0.8)');
+        grad.addColorStop(0.5, 'rgba(63, 185, 80, 0.3)');
+        grad.addColorStop(1, 'rgba(63, 185, 80, 0)');
       } else {
-        grad.addColorStop(0, 'rgba(248, 81, 73, 0.9)');
-        grad.addColorStop(1, 'rgba(248, 81, 73, 0.1)');
+        grad.addColorStop(0, 'rgba(248, 81, 73, 0.8)');
+        grad.addColorStop(0.5, 'rgba(248, 81, 73, 0.3)');
+        grad.addColorStop(1, 'rgba(248, 81, 73, 0)');
       }
-      ctx.fillStyle = grad;
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, r * 1.5, 0, Math.PI*2);
+      ctx.fillStyle = grad; ctx.fill();
       
-      // Outline for big trades
-      if (rel > 3) {
-        ctx.strokeStyle = t.isBuy ? '#3fb950' : '#f85149';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
+      // Core dot
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2);
+      ctx.fillStyle = t.isBuy ? '#3fb950' : '#f85149';
+      ctx.fill();
     });
   }
   
-  // ─── Event markers ───
-  S.events.forEach(ev => {
-    if (ev.time < tStart || ev.time > tEnd) return;
-    if (!ev.price || ev.price < lo || ev.price > hi) return;
-    const x = ((ev.time - tStart) / tRange) * drawW;
-    const y = ((hi - ev.price) / range) * H;
+  // ─── 4. BEST BID & OFFER lines ───
+  const bidPrices = Object.keys(S.orderBook.bids).map(Number);
+  const askPrices = Object.keys(S.orderBook.asks).map(Number);
+  if (bidPrices.length && askPrices.length) {
+    const bestBid = Math.max(...bidPrices);
+    const bestAsk = Math.min(...askPrices);
     
-    if (ev.type === 'AGGRESSIVE_BUY') {
-      ctx.fillStyle = '#3fb950'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('▲', x, y - 8);
-    } else if (ev.type === 'AGGRESSIVE_SELL') {
-      ctx.fillStyle = '#f85149'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('▼', x, y + 14);
-    } else if (ev.type === 'ORDER_PULL') {
-      ctx.fillStyle = '#d29922'; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2); ctx.fill();
-    } else if (ev.type === 'ORDER_STACK') {
-      ctx.fillStyle = '#a371f7'; ctx.fillRect(x-3, y-3, 6, 6);
+    if (bestBid > lo && bestBid < hi) {
+      const y = ((hi - bestBid) / range) * chartH;
+      ctx.setLineDash([2, 2]);
+      ctx.strokeStyle = 'rgba(63, 185, 80, 0.6)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(drawW * 0.5, y); ctx.lineTo(drawW, y); ctx.stroke();
+      ctx.setLineDash([]);
     }
-  });
+    if (bestAsk > lo && bestAsk < hi) {
+      const y = ((hi - bestAsk) / range) * chartH;
+      ctx.setLineDash([2, 2]);
+      ctx.strokeStyle = 'rgba(248, 81, 73, 0.6)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(drawW * 0.5, y); ctx.lineTo(drawW, y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
   
-  // ─── Current price horizontal line ───
+  // ─── Current price line ───
   if (S.currentPrice > lo && S.currentPrice < hi) {
-    const py = ((hi - S.currentPrice) / range) * H;
-    ctx.setLineDash([5,3]); ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1;
+    const py = ((hi - S.currentPrice) / range) * chartH;
+    ctx.setLineDash([6, 3]);
+    ctx.strokeStyle = '#d29922'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(drawW, py); ctx.stroke();
     ctx.setLineDash([]);
-    // Tag on right
-    ctx.fillStyle = '#ffd700'; ctx.fillRect(drawW, py - 9, AXIS, 18);
-    ctx.fillStyle = '#000'; ctx.font = 'bold 11px Consolas'; ctx.textAlign = 'left';
-    ctx.fillText(fmt(S.currentPrice), drawW + 5, py + 4);
+    // Price tag
+    ctx.fillStyle = '#d29922';
+    ctx.fillRect(drawW, py - 10, AXIS_W, 20);
+    ctx.fillStyle = '#000'; ctx.font = 'bold 10px Consolas'; ctx.textAlign = 'left';
+    ctx.fillText(fmt(S.currentPrice), drawW + 4, py + 4);
   }
   
-  // ─── Price axis ───
-  ctx.fillStyle = '#0d1117'; ctx.fillRect(drawW, 0, AXIS, H);
-  ctx.strokeStyle = '#30363d'; ctx.beginPath(); ctx.moveTo(drawW, 0); ctx.lineTo(drawW, H); ctx.stroke();
+  // ─── 5. VOLUME BARS (bottom section) ───
+  let maxVol = 0;
+  visible.forEach(c => { if (c.volume > maxVol) maxVol = c.volume; });
+  
+  ctx.fillStyle = '#161b22';
+  ctx.fillRect(0, chartH, drawW, volH);
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, chartH); ctx.lineTo(drawW, chartH); ctx.stroke();
+  
+  if (maxVol > 0) {
+    visible.forEach((c, i) => {
+      const x = i * candleW + candleW / 2;
+      const barH = (c.volume / maxVol) * (volH - 6);
+      const isGreen = c.close >= c.open;
+      
+      // Split buy/sell
+      const buyRatio = c.buyVolume ? c.buyVolume / c.volume : 0.5;
+      const buyH = barH * buyRatio;
+      const sellH = barH - buyH;
+      
+      // Sell (top)
+      ctx.fillStyle = 'rgba(248, 81, 73, 0.5)';
+      ctx.fillRect(x - bodyW/2, chartH + volH - barH, bodyW, sellH);
+      // Buy (bottom)
+      ctx.fillStyle = 'rgba(63, 185, 80, 0.5)';
+      ctx.fillRect(x - bodyW/2, chartH + volH - buyH, bodyW, buyH);
+    });
+  }
+  
+  // ─── Price Axis ───
+  ctx.fillStyle = '#0d1117'; ctx.fillRect(drawW, 0, AXIS_W, H);
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(drawW, 0); ctx.lineTo(drawW, H); ctx.stroke();
+  
   ctx.font = '10px Consolas'; ctx.fillStyle = '#6e7681'; ctx.textAlign = 'left';
-  for (let i = 0; i <= 10; i++) {
-    const y = (i/10) * H;
-    const p = hi - (i/10) * range;
-    ctx.fillText(fmt(p), drawW + 4, y + 3);
+  const numLabels = Math.floor(chartH / 50);
+  for (let i = 0; i <= numLabels; i++) {
+    const y = (i / numLabels) * chartH;
+    const price = hi - (i / numLabels) * range;
+    ctx.fillText(fmt(price), drawW + 5, y + 4);
   }
   
-  // ─── Time axis (bottom) ───
-  ctx.font = '9px Consolas'; ctx.fillStyle = '#6e7681'; ctx.textAlign = 'center';
-  for (let i = 0; i <= 5; i++) {
-    const x = (i/5) * drawW;
-    const t = new Date(tStart + (i/5) * tRange);
-    const lbl = S.currentTimeframe === '1D' 
-      ? t.toLocaleDateString([], {month:'short', day:'numeric'})
-      : t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    ctx.fillText(lbl, x, H - 4);
+  // ─── Time Axis ───
+  ctx.font = '9px Consolas'; ctx.fillStyle = '#484f58'; ctx.textAlign = 'center';
+  const numTimeLabels = Math.min(6, visible.length);
+  for (let i = 0; i <= numTimeLabels; i++) {
+    const x = (i / numTimeLabels) * drawW;
+    const t = new Date(tStart + (i / numTimeLabels) * tRange);
+    const lbl = S.currentTimeframe === '1D'
+      ? t.toLocaleDateString([], {month:'short',day:'numeric'})
+      : t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    ctx.fillText(lbl, x, H - 3);
   }
   
   // ─── Crosshair ───
-  if (S.mouse && S.mouse.x < drawW) {
-    ctx.setLineDash([3, 3]); ctx.strokeStyle = 'rgba(201, 209, 217, 0.3)'; ctx.lineWidth = 0.5;
-    ctx.beginPath(); ctx.moveTo(S.mouse.x, 0); ctx.lineTo(S.mouse.x, H); ctx.stroke();
+  if (S.mouse && S.mouse.x < drawW && S.mouse.y < chartH) {
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = 'rgba(139, 148, 158, 0.4)'; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(S.mouse.x, 0); ctx.lineTo(S.mouse.x, chartH); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, S.mouse.y); ctx.lineTo(drawW, S.mouse.y); ctx.stroke();
     ctx.setLineDash([]);
     
-    const cursorPrice = hi - (S.mouse.y / H) * range;
-    ctx.fillStyle = '#21262d'; ctx.fillRect(drawW, S.mouse.y - 9, AXIS, 18);
-    ctx.fillStyle = '#fff'; ctx.font = '10px Consolas'; ctx.textAlign = 'left';
-    ctx.fillText(fmt(cursorPrice), drawW + 5, S.mouse.y + 4);
+    // Price at cursor
+    const curPrice = hi - (S.mouse.y / chartH) * range;
+    ctx.fillStyle = '#30363d'; ctx.fillRect(drawW, S.mouse.y - 9, AXIS_W, 18);
+    ctx.fillStyle = '#e6edf3'; ctx.font = '10px Consolas'; ctx.textAlign = 'left';
+    ctx.fillText(fmt(curPrice), drawW + 5, S.mouse.y + 4);
+    
+    // OHLC info at top
+    const candleIdx = Math.floor(S.mouse.x / candleW);
+    if (candleIdx >= 0 && candleIdx < visible.length) {
+      const c = visible[candleIdx];
+      const info = `O:${fmt(c.open)}  H:${fmt(c.high)}  L:${fmt(c.low)}  C:${fmt(c.close)}  V:${c.volume.toFixed(3)}`;
+      ctx.fillStyle = 'rgba(13,17,23,0.9)'; ctx.fillRect(5, 5, ctx.measureText(info).width + 16, 20);
+      ctx.fillStyle = '#e6edf3'; ctx.font = '10px Consolas'; ctx.textAlign = 'left';
+      ctx.fillText(info, 13, 18);
+    }
   }
   
   requestAnimationFrame(render);
 }
 
-// Bookmap-style color: blue→green→yellow→orange→red as intensity increases
-function bookmapColor(intensity) {
+// Bookmap heatmap color: blue → cyan → yellow → orange → red
+function heatColor(intensity) {
   const i = Math.max(0, Math.min(1, intensity));
-  let r, g, b, a;
-  
-  if (i < 0.15) {
-    // Very low - faint blue
-    r = 30; g = 80; b = 160; a = 0.15 + i * 1.5;
-  } else if (i < 0.35) {
-    // Low - cyan/teal
-    const t = (i - 0.15) / 0.2;
-    r = 30 + t * 70; g = 80 + t * 130; b = 160 + t * 30; a = 0.4;
-  } else if (i < 0.55) {
-    // Medium - green/yellow
-    const t = (i - 0.35) / 0.2;
-    r = 100 + t * 155; g = 210; b = 190 - t * 190; a = 0.55;
-  } else if (i < 0.75) {
-    // High - yellow/orange
-    const t = (i - 0.55) / 0.2;
-    r = 255; g = 210 - t * 80; b = 0; a = 0.7;
-  } else {
-    // Very high - red/hot
-    const t = (i - 0.75) / 0.25;
-    r = 255; g = 130 - t * 130; b = 0; a = 0.85;
-  }
-  
-  return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a})`;
+  if (i < 0.2) return `rgba(30, 70, 150, ${0.15 + i * 1.5})`;
+  if (i < 0.4) return `rgba(0, 160, 200, ${0.3 + i * 0.5})`;
+  if (i < 0.6) return `rgba(200, 200, 0, ${0.4 + i * 0.3})`;
+  if (i < 0.8) return `rgba(255, 140, 0, ${0.5 + i * 0.3})`;
+  return `rgba(255, 50, 0, ${0.6 + i * 0.3})`;
 }
 
-// ═══════════ SIDE PANELS ═══════════
+
+
+// ═══════════ SIDE PANEL UPDATES ═══════════
 function renderSide() {
-  const bids = Object.entries(S.orderBook.bids).map(([p,q]) => ({price:+p, qty:q})).sort((a,b)=>b.price-a.price).slice(0,10);
-  const asks = Object.entries(S.orderBook.asks).map(([p,q]) => ({price:+p, qty:q})).sort((a,b)=>a.price-b.price).slice(0,10);
+  // DOM ladder
+  const bids = Object.entries(S.orderBook.bids).map(([p,q])=>({price:+p,qty:q})).sort((a,b)=>b.price-a.price).slice(0,10);
+  const asks = Object.entries(S.orderBook.asks).map(([p,q])=>({price:+p,qty:q})).sort((a,b)=>a.price-b.price).slice(0,10);
   const mq = Math.max(...bids.map(b=>b.qty), ...asks.map(a=>a.qty), 1);
   
   let html = '';
@@ -387,7 +427,7 @@ function renderSide() {
   });
   if (bids.length && asks.length) {
     const sp = asks[0].price - bids[0].price;
-    html += `<div class="dom-row spread-row"><div></div><div class="dom-price" style="color:#d29922;font-size:9px">⟷ ${fmt(sp)}</div><div></div></div>`;
+    html += `<div class="dom-row spread-row"><div></div><div class="dom-price" style="color:#d29922;font-size:9px">spread ${fmt(sp)}</div><div></div></div>`;
   }
   bids.forEach(l => {
     html += `<div class="dom-row"><div class="dom-bid">${l.qty.toFixed(3)}</div><div class="dom-price" style="color:#3fb950">${fmt(l.price)}</div><div></div><div class="dom-bar-bid" style="width:${(l.qty/mq)*45}%"></div></div>`;
@@ -395,16 +435,16 @@ function renderSide() {
   document.getElementById('dom').innerHTML = html;
   
   // Events
-  const evs = S.events.slice(-30).reverse();
+  const evs = S.events.slice(-25).reverse();
   let evH = '';
   evs.forEach(ev => {
     const t = new Date(ev.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
     let cls='', txt='';
-    if (ev.type === 'AGGRESSIVE_BUY') { cls='buy'; txt=`${t} ▲ BUY ${ev.size?.toFixed(3)||''} @${fmt(ev.price)}`; }
-    else if (ev.type === 'AGGRESSIVE_SELL') { cls='sell'; txt=`${t} ▼ SELL ${ev.size?.toFixed(3)||''} @${fmt(ev.price)}`; }
-    else if (ev.type === 'ORDER_PULL') { cls='pull'; txt=`${t} ⚠ ${ev.side} PULL @${fmt(ev.price)}`; }
-    else if (ev.type === 'ORDER_STACK') { cls='stack'; txt=`${t} ■ ${ev.side} STACK @${fmt(ev.price)}`; }
-    else txt=`${t} ${ev.type}`;
+    if (ev.type==='AGGRESSIVE_BUY') { cls='buy'; txt=`${t} BUY ${ev.size?.toFixed(3)||''} @${fmt(ev.price)}`; }
+    else if (ev.type==='AGGRESSIVE_SELL') { cls='sell'; txt=`${t} SELL ${ev.size?.toFixed(3)||''} @${fmt(ev.price)}`; }
+    else if (ev.type==='ORDER_PULL') { cls='pull'; txt=`${t} ${ev.side} PULL @${fmt(ev.price)}`; }
+    else if (ev.type==='ORDER_STACK') { cls='stack'; txt=`${t} ${ev.side} STACK @${fmt(ev.price)}`; }
+    else txt = `${t} ${ev.type}`;
     evH += `<div class="ev ${cls}">${txt}</div>`;
   });
   document.getElementById('events').innerHTML = evH;
@@ -422,19 +462,16 @@ function renderSide() {
   
   document.getElementById('sBid').textContent = bv.toFixed(2);
   document.getElementById('sAsk').textContent = av.toFixed(2);
-  document.getElementById('sBuy').textContent = buys.toFixed(2);
-  document.getElementById('sSell').textContent = sells.toFixed(2);
+  document.getElementById('sBuy').textContent = buys.toFixed(3);
+  document.getElementById('sSell').textContent = sells.toFixed(3);
   document.getElementById('sSpread').textContent = fmt(sp);
   const ie = document.getElementById('sImbal');
-  ie.textContent = im+'%';
-  ie.style.color = im>0?'#3fb950':im<0?'#f85149':'#888';
+  ie.textContent = im+'%'; ie.style.color = im>0?'#3fb950':im<0?'#f85149':'#8b949e';
   
   // Price
   const pe = document.getElementById('priceVal');
   pe.textContent = fmt(S.currentPrice);
-  if (S.candles.length>0) {
-    pe.style.color = S.currentPrice >= S.candles[S.candles.length-1].open ? '#3fb950' : '#f85149';
-  }
+  pe.style.color = S.candles.length>0 && S.currentPrice>=S.candles[S.candles.length-1].open ? '#3fb950' : '#f85149';
   
   // Countdown
   const tfMs = TF_MS[S.currentTimeframe] || 60000;
@@ -442,26 +479,25 @@ function renderSide() {
   const rem = (Math.floor(now/tfMs)*tfMs + tfMs) - now;
   const m = Math.floor(rem/60000);
   const s = Math.floor((rem%60000)/1000);
-  document.getElementById('countdown').textContent = `${m}:${s.toString().padStart(2,'0')}`;
+  document.getElementById('countdown').textContent = `${m}:${String(s).padStart(2,'0')}`;
   
   // Status
   document.getElementById('connDot').className = 'conn-dot' + (S.connected?' on':'');
-  document.getElementById('connText').textContent = S.connected ? (S.serverConnected?'Live WS':'REST') : 'Offline';
-  document.getElementById('sInst').textContent = S.instruments[S.currentInstrument]?.name || S.currentInstrument;
-  document.getElementById('sInfo').textContent = `${S.candles.length}c | ${S.domHistory.length}snap | ${S.trades.length}t`;
+  document.getElementById('connText').textContent = S.connected ? (S.serverConnected?'Live':'REST') : 'Offline';
+  document.getElementById('sInst').textContent = S.instruments[S.currentInstrument]?.name || '';
+  document.getElementById('sInfo').textContent = `${S.candles.length}c ${S.domHistory.length}snaps`;
 }
-
-setInterval(renderSide, 250);
+setInterval(renderSide, 300);
 
 // ═══════════ BUTTONS ═══════════
-function buildBtns() {
+function buildButtons() {
   const ie = document.getElementById('instBtns');
   ie.innerHTML = '';
   Object.keys(S.instruments).forEach(k => {
     const b = document.createElement('button');
     b.className = 'btn inst' + (k===S.currentInstrument?' active':'');
     b.textContent = k; b.dataset.val = k;
-    b.onclick = () => { send({type:'CHANGE_INSTRUMENT',instrument:k}); setActive('.inst',k); S.candles=[]; S.domHistory=[]; };
+    b.onclick = () => { send({type:'CHANGE_INSTRUMENT',instrument:k}); setActive('.inst',k); };
     ie.appendChild(b);
   });
   const te = document.getElementById('tfBtns');
@@ -470,55 +506,58 @@ function buildBtns() {
     const b = document.createElement('button');
     b.className = 'btn tf' + (tf===S.currentTimeframe?' active':'');
     b.textContent = tf; b.dataset.val = tf;
-    b.onclick = () => { send({type:'CHANGE_TIMEFRAME',timeframe:tf}); setActive('.tf',tf); S.offset=0; document.getElementById('sTf').textContent=tf; };
+    b.onclick = () => { send({type:'CHANGE_TIMEFRAME',timeframe:tf}); setActive('.tf',tf); document.getElementById('sTf').textContent=tf; };
     te.appendChild(b);
   });
 }
-
-function setActive(sel, val) {
-  document.querySelectorAll(sel).forEach(b => b.classList.toggle('active', b.dataset.val===val));
-}
-
-function updateConnUI() {
+function setActive(sel, val) { document.querySelectorAll(sel).forEach(b => b.classList.toggle('active', b.dataset.val===val)); }
+function updateUI() {
   document.getElementById('connDot').className = 'conn-dot' + (S.connected?' on':'');
   document.getElementById('connText').textContent = S.connected ? 'Connected' : 'Reconnecting';
 }
 
-// ═══════════ CONTROLS ═══════════
-document.getElementById('zoomIn').onclick = () => { S.zoom = Math.min(S.zoom*1.3, 8); };
-document.getElementById('zoomOut').onclick = () => { S.zoom = Math.max(S.zoom/1.3, 0.3); };
-document.getElementById('zoomReset').onclick = () => { S.zoom = 1; S.offset = 0; };
+// ═══════════ SMOOTH ZOOM & SCROLL (TradingView style) ═══════════
+document.getElementById('zoomIn').onclick = () => { S.targetZoom = Math.min(S.targetZoom * 1.4, 10); };
+document.getElementById('zoomOut').onclick = () => { S.targetZoom = Math.max(S.targetZoom / 1.4, 0.2); };
+document.getElementById('zoomReset').onclick = () => { S.targetZoom = 1; S.targetScrollX = 0; };
 
+// Mouse wheel = zoom (smooth)
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  S.zoom = e.deltaY < 0 ? Math.min(S.zoom*1.1, 8) : Math.max(S.zoom/1.1, 0.3);
-});
+  const factor = e.deltaY < 0 ? 1.08 : 0.92;
+  S.targetZoom = Math.max(0.2, Math.min(10, S.targetZoom * factor));
+}, { passive: false });
 
+// Drag = scroll (smooth)
 canvas.addEventListener('mousedown', (e) => {
-  S.dragging = true; S.dragStartX = e.clientX; S.dragStartOff = S.offset;
+  S.dragging = true;
+  S.dragStartX = e.clientX;
+  S.dragStartScroll = S.targetScrollX;
   canvas.style.cursor = 'grabbing';
 });
-
 canvas.addEventListener('mousemove', (e) => {
   const r = canvas.getBoundingClientRect();
   S.mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
   if (S.dragging) {
     const dx = e.clientX - S.dragStartX;
-    const cw = (W - AXIS) / Math.max(20, Math.floor(80/S.zoom));
-    S.offset = Math.max(0, Math.min(S.candles.length - 10, S.dragStartOff + Math.round(dx/cw)));
+    const pxPerCandle = (W - AXIS_W) / Math.round(80 / S.targetZoom);
+    const candleShift = dx / pxPerCandle;
+    S.targetScrollX = Math.max(0, Math.min(S.candles.length - 20, S.dragStartScroll + candleShift));
   }
 });
-
 canvas.addEventListener('mouseleave', () => { S.mouse = null; });
 window.addEventListener('mouseup', () => { S.dragging = false; canvas.style.cursor = 'crosshair'; });
+canvas.style.cursor = 'crosshair';
 
 // ═══════════ HELPERS ═══════════
 function fmt(p) {
   if (!p || p === 0) return '--';
-  if (p > 1000) return p.toFixed(2);
+  if (p > 10000) return p.toFixed(2);
+  if (p > 100) return p.toFixed(2);
   if (p > 1) return p.toFixed(4);
   return p.toFixed(6);
 }
 
+// ═══════════ START ═══════════
 connect();
 render();
