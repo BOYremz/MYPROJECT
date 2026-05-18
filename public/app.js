@@ -167,85 +167,96 @@ function render() {
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, chartH); ctx.stroke();
   }
   
-  // ─── 1. LIQUIDITY HEATMAP (FULL BACKGROUND behind all candles) ───
-  // Each DOM snapshot = one vertical column of colored bands
-  // They should span the ENTIRE chart width
+  // ─── 1. LIQUIDITY HEATMAP (dense bands like real Bookmap) ───
+  // Real Bookmap = thick solid bands at each price level filling full width
   let maxQ = 0;
   S.domHistory.forEach(snap => {
     Object.values(snap.bids).forEach(q => { if (q > maxQ) maxQ = q; });
     Object.values(snap.asks).forEach(q => { if (q > maxQ) maxQ = q; });
   });
+  // Also check current order book
+  Object.values(S.orderBook.bids).forEach(q => { if (q > maxQ) maxQ = q; });
+  Object.values(S.orderBook.asks).forEach(q => { if (q > maxQ) maxQ = q; });
   if (maxQ === 0) maxQ = 1;
   
-  // Get snapshots that overlap with our time range
+  // Calculate band height: divide visible price range by number of price levels
+  // This makes bands thick enough to create the solid "wall" look
+  const allPrices = [
+    ...Object.keys(S.orderBook.bids).map(Number),
+    ...Object.keys(S.orderBook.asks).map(Number)
+  ].sort((a, b) => a - b);
+  
+  // Minimum gap between price levels determines band thickness
+  let minGap = range * 0.01; // default
+  for (let i = 1; i < allPrices.length; i++) {
+    const gap = allPrices[i] - allPrices[i-1];
+    if (gap > 0 && gap < minGap) minGap = gap;
+  }
+  // Band height in pixels — make it thick enough to create solid coverage
+  const bandPx = Math.max(4, (minGap / range) * chartH * 0.9);
+  
+  // Get visible DOM snapshots
   const visibleSnaps = S.domHistory.filter(s => s.time >= tStart - tRange*0.1 && s.time <= tEnd + tRange*0.1);
   
   if (visibleSnaps.length > 0) {
-    // If we have few snapshots, spread them across the FULL width
-    // This ensures the heatmap covers the whole background
     const snapSpacing = chartDrawW / Math.max(1, visibleSnaps.length);
     
     visibleSnaps.forEach((snap, idx) => {
-      // Map snapshot to chart X position
       let x;
       if (visibleSnaps.length < 10) {
-        // Few snapshots: spread evenly across entire width
         x = idx * snapSpacing;
       } else {
-        // Many snapshots: map by time
         x = ((snap.time - tStart) / tRange) * chartDrawW;
       }
-      
       if (x < -20 || x > chartDrawW + 20) return;
       
-      // Column width — fill gap to next snapshot
-      const colW = Math.max(3, snapSpacing);
+      const colW = Math.max(3, snapSpacing + 1);
       
-      // Draw ALL bid levels (support zones)
+      // Bids — thick solid bands
       Object.entries(snap.bids).forEach(([p, q]) => {
         const price = +p;
         if (price < lo || price > hi) return;
         const y = ((hi - price) / range) * chartH;
         const intensity = Math.min(q / maxQ, 1);
+        if (intensity < 0.02) return; // skip tiny orders
         ctx.fillStyle = heatColor(intensity);
-        // Band thickness grows with intensity
-        const bandH = Math.max(2, 2 + intensity * 5);
-        ctx.fillRect(x, y - bandH/2, colW + 1, bandH);
+        ctx.fillRect(x, y - bandPx/2, colW, bandPx);
       });
       
-      // Draw ALL ask levels (resistance zones)
+      // Asks — thick solid bands
       Object.entries(snap.asks).forEach(([p, q]) => {
         const price = +p;
         if (price < lo || price > hi) return;
         const y = ((hi - price) / range) * chartH;
         const intensity = Math.min(q / maxQ, 1);
+        if (intensity < 0.02) return;
         ctx.fillStyle = heatColor(intensity);
-        const bandH = Math.max(2, 2 + intensity * 5);
-        ctx.fillRect(x, y - bandH/2, colW + 1, bandH);
+        ctx.fillRect(x, y - bandPx/2, colW, bandPx);
       });
     });
   }
   
-  // Also paint current order book across the RIGHT HALF as a live overlay
-  // This shows where liquidity sits RIGHT NOW
+  // Current order book — paint as solid bands on right portion (live liquidity wall)
+  const liveStartX = Math.max(0, chartDrawW - chartDrawW * 0.4);
+  const liveW = chartDrawW * 0.4 + rightPad;
+  
   Object.entries(S.orderBook.bids).forEach(([p, q]) => {
     const price = +p;
     if (price < lo || price > hi) return;
     const y = ((hi - price) / range) * chartH;
     const intensity = Math.min(q / maxQ, 1);
+    if (intensity < 0.02) return;
     ctx.fillStyle = heatColor(intensity);
-    const bandH = Math.max(3, 2 + intensity * 6);
-    // Draw from middle to right edge (live liquidity)
-    ctx.fillRect(chartDrawW * 0.5, y - bandH/2, chartDrawW * 0.5 + rightPad, bandH);
+    ctx.fillRect(liveStartX, y - bandPx/2, liveW, bandPx);
   });
   Object.entries(S.orderBook.asks).forEach(([p, q]) => {
     const price = +p;
     if (price < lo || price > hi) return;
     const y = ((hi - price) / range) * chartH;
     const intensity = Math.min(q / maxQ, 1);
+    if (intensity < 0.02) return;
     ctx.fillStyle = heatColor(intensity);
-    const bandH = Math.max(3, 2 + intensity * 6);
-    ctx.fillRect(chartDrawW * 0.5, y - bandH/2, chartDrawW * 0.5 + rightPad, bandH);
+    ctx.fillRect(liveStartX, y - bandPx/2, liveW, bandPx);
   });
   
   // ─── 2. CANDLESTICKS (on top of heatmap) ───
@@ -428,14 +439,16 @@ function render() {
   requestAnimationFrame(render);
 }
 
-// Bookmap heatmap color: blue → cyan → yellow → orange → red
+// Bookmap heatmap color: dark blue → bright blue → cyan → yellow → orange → red
 function heatColor(intensity) {
   const i = Math.max(0, Math.min(1, intensity));
-  if (i < 0.2) return `rgba(30, 70, 150, ${0.15 + i * 1.5})`;
-  if (i < 0.4) return `rgba(0, 160, 200, ${0.3 + i * 0.5})`;
-  if (i < 0.6) return `rgba(200, 200, 0, ${0.4 + i * 0.3})`;
-  if (i < 0.8) return `rgba(255, 140, 0, ${0.5 + i * 0.3})`;
-  return `rgba(255, 50, 0, ${0.6 + i * 0.3})`;
+  if (i < 0.1) return `rgba(20, 50, 120, 0.5)`;
+  if (i < 0.25) return `rgba(30, 80, 180, 0.6)`;
+  if (i < 0.4) return `rgba(0, 140, 200, 0.65)`;
+  if (i < 0.55) return `rgba(50, 200, 180, 0.7)`;
+  if (i < 0.7) return `rgba(200, 200, 0, 0.75)`;
+  if (i < 0.85) return `rgba(255, 140, 0, 0.8)`;
+  return `rgba(255, 40, 0, 0.85)`;
 }
 
 
