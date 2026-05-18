@@ -1,128 +1,430 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Free Bookmap</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bookmap Clone - Order Flow Visualization</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #0d1117; color: #c9d1d9; font-family: 'Consolas', monospace; overflow: hidden; height: 100vh; }
     
-    #topBar { display: flex; align-items: center; padding: 6px 12px; background: #161b22; border-bottom: 1px solid #30363d; height: 42px; gap: 10px; }
-    .logo { font-size: 13px; font-weight: bold; color: #00d4ff; letter-spacing: 1px; }
-    .group { display: flex; gap: 3px; }
-    .btn { padding: 4px 10px; background: #21262d; border: 1px solid #30363d; color: #8b949e; border-radius: 4px; cursor: pointer; font-size: 11px; font-family: inherit; }
-    .btn:hover { background: #30363d; color: #fff; }
-    .btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
-    .btn.tf.active { background: #d29922; border-color: #d29922; color: #000; }
-    .sep { width: 1px; height: 22px; background: #30363d; }
-    .price-area { margin-left: auto; display: flex; align-items: center; gap: 14px; }
-    .countdown { font-size: 11px; color: #d29922; background: rgba(210,153,34,0.15); padding: 3px 10px; border-radius: 3px; border: 1px solid rgba(210,153,34,0.3); }
-    .price-val { font-size: 18px; font-weight: bold; min-width: 100px; text-align: right; }
-    
-    #main { display: grid; grid-template-columns: 1fr 250px; height: calc(100vh - 42px - 22px); }
-    #chartArea { position: relative; overflow: hidden; }
-    #chartCanvas { display: block; cursor: crosshair; }
-    
-    #right { background: #0d1117; border-left: 1px solid #30363d; display: flex; flex-direction: column; overflow: hidden; font-size: 10px; }
-    .sect { padding: 8px 10px; border-bottom: 1px solid #21262d; }
-    .sect-title { font-size: 9px; color: #00d4ff; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 5px; font-weight: bold; }
-    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
-    .stat { display: flex; justify-content: space-between; }
-    .stat-l { color: #6e7681; }
-    .stat-v { font-weight: bold; }
-    .green { color: #3fb950; }
-    .red { color: #f85149; }
-    
-    #dom { flex: 1; overflow-y: auto; padding: 4px 8px; }
-    .dom-row { display: grid; grid-template-columns: 60px 1fr 60px; height: 17px; align-items: center; position: relative; font-size: 10px; }
-    .dom-bid { text-align: right; color: #3fb950; padding-right: 5px; z-index: 1; }
-    .dom-ask { text-align: left; color: #f85149; padding-left: 5px; z-index: 1; }
-    .dom-price { text-align: center; color: #c9d1d9; z-index: 1; font-weight: bold; }
-    .dom-bar-bid { position: absolute; right: 50%; height: 15px; background: rgba(63,185,80,0.18); border-right: 1px solid rgba(63,185,80,0.4); }
-    .dom-bar-ask { position: absolute; left: 50%; height: 15px; background: rgba(248,81,73,0.18); border-left: 1px solid rgba(248,81,73,0.4); }
-    .spread-row { background: rgba(210,153,34,0.08); }
-    
-    #events { height: 160px; overflow-y: auto; padding: 4px 8px; }
-    .ev { padding: 2px 5px; margin-bottom: 1px; border-left: 2px solid #30363d; background: #161b22; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 9px; }
-    .ev.buy { border-left-color: #3fb950; color: #3fb950; }
-    .ev.sell { border-left-color: #f85149; color: #f85149; }
-    .ev.pull { border-left-color: #d29922; color: #d29922; }
-    .ev.stack { border-left-color: #a371f7; color: #a371f7; }
-    
-    .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; font-size: 9px; }
-    .leg { display: flex; align-items: center; gap: 4px; }
-    .dot { width: 8px; height: 4px; border-radius: 1px; }
-    
-    #bottom { height: 22px; background: #161b22; border-top: 1px solid #30363d; display: flex; align-items: center; padding: 0 12px; font-size: 10px; color: #6e7681; gap: 16px; }
-    .conn-dot { width: 6px; height: 6px; border-radius: 50%; background: #f85149; display: inline-block; margin-right: 5px; }
-    .conn-dot.on { background: #3fb950; }
-    
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: #0d1117; }
-    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+    :root {
+      --bg-primary: #1a1a2e;
+      --bg-secondary: #16213e;
+      --bg-tertiary: #0f3460;
+      --bg-panel: #1c1c3a;
+      --border-color: #2a2a4a;
+      --text-primary: #e0e0e0;
+      --text-secondary: #a0a0b0;
+      --text-muted: #606080;
+      --accent-blue: #4fc3f7;
+      --accent-green: #66bb6a;
+      --accent-red: #ef5350;
+      --accent-yellow: #ffd54f;
+      --accent-orange: #ff9800;
+      --bid-color: #1b5e20;
+      --ask-color: #b71c1c;
+      --bid-text: #4caf50;
+      --ask-text: #f44336;
+    }
+
+    body {
+      font-family: 'Segoe UI', 'Roboto', monospace;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* ===== TOP TOOLBAR ===== */
+    #toolbar {
+      display: flex;
+      align-items: center;
+      height: 36px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      padding: 0 12px;
+      gap: 16px;
+      font-size: 12px;
+    }
+
+    .toolbar-brand {
+      font-weight: bold;
+      font-size: 14px;
+      color: var(--accent-blue);
+      letter-spacing: 1px;
+    }
+
+    .toolbar-sep {
+      width: 1px;
+      height: 20px;
+      background: var(--border-color);
+    }
+
+    .toolbar-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--text-secondary);
+    }
+
+    .toolbar-item .value {
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .toolbar-item.positive .value { color: var(--accent-green); }
+    .toolbar-item.negative .value { color: var(--accent-red); }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    /* ===== MAIN LAYOUT ===== */
+    #main-container {
+      display: flex;
+      height: calc(100vh - 36px);
+    }
+
+    /* ===== VOLUME PROFILE (LEFT) ===== */
+    #volume-profile {
+      width: 80px;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border-color);
+      position: relative;
+      overflow: hidden;
+    }
+
+    #volume-profile canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ===== HEATMAP (CENTER) ===== */
+    #heatmap-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      cursor: crosshair;
+    }
+
+    #heatmap-canvas {
+      display: block;
+    }
+
+    #crosshair-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .crosshair-label {
+      position: absolute;
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 2px;
+      pointer-events: none;
+      display: none;
+      font-family: monospace;
+    }
+
+    #price-label {
+      right: 0;
+      transform: translateY(-50%);
+    }
+
+    #time-label {
+      bottom: 0;
+      transform: translateX(-50%);
+    }
+
+    /* ===== PRICE AXIS (RIGHT of heatmap) ===== */
+    #price-axis {
+      width: 65px;
+      background: var(--bg-panel);
+      border-left: 1px solid var(--border-color);
+      border-right: 1px solid var(--border-color);
+      position: relative;
+      overflow: hidden;
+    }
+
+    #price-axis canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ===== DOM LADDER (RIGHT) ===== */
+    #dom-panel {
+      width: 220px;
+      background: var(--bg-panel);
+      border-left: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+    }
+
+    #dom-header {
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    #dom-ladder {
+      flex: 1;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+    }
+
+    #dom-ladder table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    #dom-ladder tr {
+      height: 18px;
+      border-bottom: 1px solid rgba(42, 42, 74, 0.3);
+    }
+
+    #dom-ladder td {
+      padding: 0 4px;
+      text-align: right;
+      white-space: nowrap;
+      position: relative;
+    }
+
+    #dom-ladder .bid-row {
+      background: rgba(27, 94, 32, 0.15);
+    }
+
+    #dom-ladder .ask-row {
+      background: rgba(183, 28, 28, 0.15);
+    }
+
+    #dom-ladder .spread-row {
+      background: rgba(79, 195, 247, 0.1);
+      text-align: center;
+      color: var(--accent-blue);
+      font-size: 10px;
+    }
+
+    #dom-ladder .price-cell {
+      color: var(--text-primary);
+      font-weight: 500;
+      width: 60px;
+    }
+
+    #dom-ladder .qty-cell {
+      width: 50px;
+    }
+
+    #dom-ladder .bid-qty { color: var(--bid-text); }
+    #dom-ladder .ask-qty { color: var(--ask-text); }
+
+    #dom-ladder .bar-bg {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      opacity: 0.2;
+    }
+
+    #dom-ladder .bid-bar { background: var(--accent-green); right: 0; }
+    #dom-ladder .ask-bar { background: var(--accent-red); left: 0; }
+
+    #dom-ladder .vol-cell {
+      color: var(--text-muted);
+      font-size: 10px;
+      width: 45px;
+    }
+
+    /* ===== CVD / INDICATORS PANEL (BOTTOM) ===== */
+    #bottom-panel {
+      position: absolute;
+      bottom: 0;
+      left: 80px;
+      right: 285px;
+      height: 80px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border-color);
+    }
+
+    #cvd-canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ===== INFO OVERLAY ===== */
+    #info-overlay {
+      position: absolute;
+      top: 44px;
+      left: 92px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    #info-overlay .info-row {
+      margin-bottom: 2px;
+    }
+
+    /* ===== CONNECTION STATUS ===== */
+    #connection-status {
+      position: absolute;
+      top: 44px;
+      right: 290px;
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 3px;
+      z-index: 10;
+    }
+
+    .connected { background: rgba(76, 175, 80, 0.2); color: var(--accent-green); }
+    .disconnected { background: rgba(244, 67, 54, 0.2); color: var(--accent-red); }
+
+    /* ===== ZOOM CONTROLS ===== */
+    #zoom-controls {
+      position: absolute;
+      bottom: 90px;
+      right: 290px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      z-index: 10;
+    }
+
+    .zoom-btn {
+      width: 28px;
+      height: 28px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      font-size: 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 3px;
+    }
+
+    .zoom-btn:hover {
+      background: var(--bg-tertiary);
+    }
   </style>
 </head>
 <body>
-  <div id="topBar">
-    <div class="logo">BOOKMAP</div>
-    <div class="group" id="instBtns"></div>
-    <div class="sep"></div>
-    <div class="group" id="tfBtns"></div>
-    <div class="sep"></div>
-    <button class="btn" id="zoomIn">+</button>
-    <button class="btn" id="zoomOut">−</button>
-    <button class="btn" id="zoomReset">↺</button>
-    <div class="price-area">
-      <div class="countdown" id="countdown">--:--</div>
-      <div class="price-val" id="priceVal">--</div>
+  <!-- TOOLBAR -->
+  <div id="toolbar">
+    <span class="toolbar-brand">BOOKMAP</span>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-item">
+      <span>Symbol:</span>
+      <span class="value" id="tb-symbol">ES</span>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-item">
+      <span>Last:</span>
+      <span class="value" id="tb-last">--</span>
+    </div>
+    <div class="toolbar-item" id="tb-change-container">
+      <span>Chg:</span>
+      <span class="value" id="tb-change">--</span>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-item">
+      <span>Bid:</span>
+      <span class="value" style="color:var(--bid-text)" id="tb-bid">--</span>
+    </div>
+    <div class="toolbar-item">
+      <span>Ask:</span>
+      <span class="value" style="color:var(--ask-text)" id="tb-ask">--</span>
+    </div>
+    <div class="toolbar-item">
+      <span>Spread:</span>
+      <span class="value" id="tb-spread">--</span>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-item">
+      <span>Vol:</span>
+      <span class="value" id="tb-volume">0</span>
+    </div>
+    <div class="toolbar-item">
+      <span>Hi:</span>
+      <span class="value" style="color:var(--accent-green)" id="tb-high">--</span>
+    </div>
+    <div class="toolbar-item">
+      <span>Lo:</span>
+      <span class="value" style="color:var(--accent-red)" id="tb-low">--</span>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-item">
+      <div class="status-dot"></div>
+      <span id="tb-status">Live</span>
     </div>
   </div>
-  
-  <div id="main">
-    <div id="chartArea">
-      <canvas id="chartCanvas"></canvas>
+
+  <!-- MAIN CONTENT -->
+  <div id="main-container">
+    <!-- Volume Profile -->
+    <div id="volume-profile">
+      <canvas id="vp-canvas"></canvas>
     </div>
-    <div id="right">
-      <div class="sect">
-        <div class="sect-title">Stats</div>
-        <div class="stats">
-          <div class="stat"><span class="stat-l">Bid Vol</span><span class="stat-v green" id="sBid">0</span></div>
-          <div class="stat"><span class="stat-l">Ask Vol</span><span class="stat-v red" id="sAsk">0</span></div>
-          <div class="stat"><span class="stat-l">Buy</span><span class="stat-v green" id="sBuy">0</span></div>
-          <div class="stat"><span class="stat-l">Sell</span><span class="stat-v red" id="sSell">0</span></div>
-          <div class="stat"><span class="stat-l">Spread</span><span class="stat-v" id="sSpread">0</span></div>
-          <div class="stat"><span class="stat-l">Imbal</span><span class="stat-v" id="sImbal">0%</span></div>
-        </div>
+
+    <!-- Heatmap -->
+    <div id="heatmap-container">
+      <canvas id="heatmap-canvas"></canvas>
+      <div id="crosshair-overlay">
+        <div class="crosshair-label" id="price-label"></div>
+        <div class="crosshair-label" id="time-label"></div>
       </div>
-      <div class="sect" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-        <div class="sect-title">DOM</div>
-        <div id="dom"></div>
-      </div>
-      <div class="sect" style="height:180px">
-        <div class="sect-title">Events</div>
-        <div id="events"></div>
-      </div>
-      <div class="sect">
-        <div class="sect-title">Legend</div>
-        <div class="legend">
-          <div class="leg"><div class="dot" style="background:#ff8800"></div>Hi liquidity</div>
-          <div class="leg"><div class="dot" style="background:#ff0000"></div>Med liquidity</div>
-          <div class="leg"><div class="dot" style="background:#0088ff"></div>Lo liquidity</div>
-          <div class="leg"><div class="dot" style="background:#ffaa00;border-radius:50%"></div>Price line</div>
-          <div class="leg"><div class="dot" style="background:#3fb950;border-radius:50%"></div>Buy trade</div>
-          <div class="leg"><div class="dot" style="background:#f85149;border-radius:50%"></div>Sell trade</div>
-        </div>
+      <div id="bottom-panel">
+        <canvas id="cvd-canvas"></canvas>
       </div>
     </div>
+
+    <!-- Price Axis -->
+    <div id="price-axis">
+      <canvas id="price-canvas"></canvas>
+    </div>
+
+    <!-- DOM Ladder -->
+    <div id="dom-panel">
+      <div id="dom-header">
+        <span>BID QTY</span>
+        <span>PRICE</span>
+        <span>ASK QTY</span>
+      </div>
+      <div id="dom-ladder"></div>
+    </div>
   </div>
-  
-  <div id="bottom">
-    <span><span class="conn-dot" id="connDot"></span><span id="connText">Connecting</span></span>
-    <span id="sInst">--</span>
-    <span id="sTf">1m</span>
-    <span id="sInfo">Loading...</span>
+
+  <!-- Overlays -->
+  <div id="connection-status" class="disconnected">Connecting...</div>
+  <div id="zoom-controls">
+    <button class="zoom-btn" id="zoom-in">+</button>
+    <button class="zoom-btn" id="zoom-out">−</button>
+    <button class="zoom-btn" id="zoom-reset">⟲</button>
   </div>
-  
+
   <script src="app.js"></script>
 </body>
 </html>

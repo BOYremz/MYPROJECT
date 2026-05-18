@@ -1,343 +1,391 @@
-/**
- * FREE BOOKMAP CLONE - Real Bookmap-style heatmap
- * Loads historical klines + builds structured DOM history heatmap
- */
-
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-
-const express = require('express');
-const WebSocket = require('ws');
 const http = require('http');
-const https = require('https');
+const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+// ============================================================
+// BOOKMAP CLONE - Server with WebSocket & Market Data Simulator
+// ============================================================
 
-app.use(express.static(path.join(__dirname, 'public')));
+const PORT = 3000;
 
-const INSTRUMENTS = {
-  'XAUUSD': { symbol: 'paxgusdt', name: 'Gold / XAUUSD' },
-  'BTCUSD': { symbol: 'btcusdt', name: 'Bitcoin / USD' },
-  'ETHUSD': { symbol: 'ethusdt', name: 'Ethereum / USD' },
-  'EURUSD': { symbol: 'eurusdt', name: 'EUR / USD' },
-  'GBPUSD': { symbol: 'gbpusdt', name: 'GBP / USD' },
-  'NAS100': { symbol: 'bnbusdt', name: 'Nasdaq Proxy (BNB)' },
-  'SOLUSD': { symbol: 'solusdt', name: 'Solana / USD' },
+// MIME types for static file serving
+const MIME_TYPES = {
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon'
 };
 
-const TIMEFRAMES = {
-  '1m':  { ms: 60000,    binance: '1m'  },
-  '5m':  { ms: 300000,   binance: '5m'  },
-  '15m': { ms: 900000,   binance: '15m' },
-  '30m': { ms: 1800000,  binance: '30m' },
-  '1h':  { ms: 3600000,  binance: '1h'  },
-  '4h':  { ms: 14400000, binance: '4h'  },
-  '1D':  { ms: 86400000, binance: '1d'  },
-};
+// Create HTTP server for static files
+const server = http.createServer((req, res) => {
+  let filePath = path.join(__dirname, 'public', req.url === '/' ? 'index.html' : req.url);
+  const ext = path.extname(filePath);
+  const contentType = MIME_TYPES[ext] || 'text/plain';
 
-let CONFIG = { currentInstrument: 'BTCUSD', currentTimeframe: '1m' };
-
-let orderBook = { bids: {}, asks: {} };
-let previousOrderBook = { bids: {}, asks: {} };
-let currentPrice = 0;
-let trades = [];
-let candles = {};
-let domHistory = [];
-let events = [];
-let avgTradeSize = 0;
-let tradeCount = 0;
-let connected = false;
-
-Object.keys(TIMEFRAMES).forEach(tf => { candles[tf] = []; });
-
-let depthWs = null;
-let tradeWs = null;
-
-function fetchJSON(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, { rejectUnauthorized: false }, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
-      });
-    }).on('error', reject);
-  });
-}
-
-async function loadHistoricalCandles(symbol, tf, limit = 200) {
-  try {
-    const interval = TIMEFRAMES[tf].binance;
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
-    const data = await fetchJSON(url);
-    if (Array.isArray(data)) {
-      candles[tf] = data.map(k => ({
-        openTime: k[0], closeTime: k[6],
-        open: parseFloat(k[1]), high: parseFloat(k[2]),
-        low: parseFloat(k[3]), close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
-        buyVolume: parseFloat(k[9]) || parseFloat(k[5]) * 0.5,
-        sellVolume: parseFloat(k[5]) - (parseFloat(k[9]) || parseFloat(k[5]) * 0.5),
-      }));
-      currentPrice = candles[tf][candles[tf].length-1]?.close || 0;
-      console.log(`[REST] Loaded ${candles[tf].length} ${tf} candles`);
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
     }
-  } catch (err) {
-    console.error(`[REST] Candles error: ${err.message}`);
-  }
-}
-
-async function loadOrderBook(symbol) {
-  try {
-    const url = `https://api.binance.com/api/v3/depth?symbol=${symbol.toUpperCase()}&limit=100`;
-    const data = await fetchJSON(url);
-    if (data.bids && data.asks) {
-      previousOrderBook = JSON.parse(JSON.stringify(orderBook));
-      orderBook.bids = {};
-      orderBook.asks = {};
-      data.bids.forEach(([p, q]) => { orderBook.bids[parseFloat(p)] = parseFloat(q); });
-      data.asks.forEach(([p, q]) => { orderBook.asks[parseFloat(p)] = parseFloat(q); });
-      takeDOMSnapshot();
-    }
-  } catch (err) {}
-}
-
-async function loadRecentTrades(symbol) {
-  try {
-    const url = `https://api.binance.com/api/v3/trades?symbol=${symbol.toUpperCase()}&limit=200`;
-    const data = await fetchJSON(url);
-    if (Array.isArray(data)) {
-      trades = data.map(t => ({
-        price: parseFloat(t.price),
-        qty: parseFloat(t.qty),
-        time: t.time,
-        isBuy: !t.isBuyerMaker,
-      }));
-      const total = trades.reduce((a,t) => a+t.qty, 0);
-      avgTradeSize = total / trades.length;
-      currentPrice = trades[trades.length-1]?.price || currentPrice;
-    }
-  } catch (err) {}
-}
-
-function takeDOMSnapshot() {
-  if (Object.keys(orderBook.bids).length === 0) return;
-  domHistory.push({
-    time: Date.now(),
-    price: currentPrice,
-    bids: { ...orderBook.bids },
-    asks: { ...orderBook.asks },
+    res.writeHead(200, { 'Content-Type': contentType });
+    res.end(data);
   });
-  if (domHistory.length > 600) domHistory = domHistory.slice(-600);
-}
-
-setInterval(takeDOMSnapshot, 1000);
-
-function getSymbol() { return INSTRUMENTS[CONFIG.currentInstrument].symbol; }
-
-function connectDepthStream() {
-  if (depthWs) try { depthWs.close(); } catch(e){}
-  const symbol = getSymbol();
-  try {
-    depthWs = new WebSocket(`wss://stream.binance.com:9443/ws/${symbol}@depth20@100ms`, { rejectUnauthorized: false });
-    depthWs.on('open', () => { connected = true; console.log(`[WS] Depth: ${symbol}`); });
-    depthWs.on('message', (data) => {
-      try {
-        const d = JSON.parse(data);
-        previousOrderBook = JSON.parse(JSON.stringify(orderBook));
-        orderBook.bids = {};
-        orderBook.asks = {};
-        if (d.bids) d.bids.forEach(([p,q]) => { if (parseFloat(q)>0) orderBook.bids[parseFloat(p)] = parseFloat(q); });
-        if (d.asks) d.asks.forEach(([p,q]) => { if (parseFloat(q)>0) orderBook.asks[parseFloat(p)] = parseFloat(q); });
-        const bP = Object.keys(orderBook.bids).map(Number);
-        const aP = Object.keys(orderBook.asks).map(Number);
-        if (bP.length && aP.length) currentPrice = (Math.max(...bP) + Math.min(...aP))/2;
-        detectEvents();
-      } catch(e) {}
-    });
-    depthWs.on('close', () => { connected = false; setTimeout(connectDepthStream, 5000); });
-    depthWs.on('error', () => { connected = false; });
-  } catch(e) { connected = false; }
-}
-
-function connectTradeStream() {
-  if (tradeWs) try { tradeWs.close(); } catch(e){}
-  const symbol = getSymbol();
-  try {
-    tradeWs = new WebSocket(`wss://stream.binance.com:9443/ws/${symbol}@aggTrade`, { rejectUnauthorized: false });
-    tradeWs.on('open', () => console.log(`[WS] Trade: ${symbol}`));
-    tradeWs.on('message', (data) => {
-      try {
-        const t = JSON.parse(data);
-        const price = parseFloat(t.p), qty = parseFloat(t.q), time = t.T || Date.now();
-        const isBuy = !t.m;
-        currentPrice = price;
-        trades.push({ price, qty, time, isBuy });
-        if (trades.length > 2000) trades = trades.slice(-2000);
-        updateCandle(price, qty, time, isBuy);
-        tradeCount++;
-        avgTradeSize = avgTradeSize + (qty - avgTradeSize) / Math.min(tradeCount, 200);
-        if (qty >= avgTradeSize * 3 && avgTradeSize > 0) {
-          addEvent({ type: isBuy?'AGGRESSIVE_BUY':'AGGRESSIVE_SELL', price, size: qty, time: Date.now() });
-        }
-      } catch(e) {}
-    });
-    tradeWs.on('close', () => setTimeout(connectTradeStream, 5000));
-    tradeWs.on('error', () => {});
-  } catch(e) {}
-}
-
-function updateCandle(price, qty, ts, isBuy) {
-  Object.entries(TIMEFRAMES).forEach(([tf, info]) => {
-    const openTime = Math.floor(ts/info.ms)*info.ms;
-    const arr = candles[tf];
-    let last = arr[arr.length-1];
-    if (!last || last.openTime !== openTime) {
-      arr.push({ openTime, closeTime: openTime+info.ms, open: price, high: price, low: price, close: price, volume: qty, buyVolume: isBuy?qty:0, sellVolume: isBuy?0:qty });
-      if (arr.length > 500) candles[tf] = arr.slice(-500);
-    } else {
-      last.high = Math.max(last.high, price);
-      last.low = Math.min(last.low, price);
-      last.close = price;
-      last.volume += qty;
-      if (isBuy) last.buyVolume += qty; else last.sellVolume += qty;
-    }
-  });
-}
-
-function detectEvents() {
-  const threshold = avgTradeSize * 2;
-  for (const p of Object.keys(previousOrderBook.bids)) {
-    const old = previousOrderBook.bids[p]||0, nw = orderBook.bids[p]||0;
-    if (old >= threshold && nw < old*0.4) addEvent({ type:'ORDER_PULL', side:'BID', price: parseFloat(p), time: Date.now() });
-  }
-  for (const p of Object.keys(previousOrderBook.asks)) {
-    const old = previousOrderBook.asks[p]||0, nw = orderBook.asks[p]||0;
-    if (old >= threshold && nw < old*0.4) addEvent({ type:'ORDER_PULL', side:'ASK', price: parseFloat(p), time: Date.now() });
-  }
-  for (const p of Object.keys(orderBook.bids)) {
-    const old = previousOrderBook.bids[p]||0, nw = orderBook.bids[p]||0;
-    if (nw >= threshold && old > 0 && nw > old*2.5) addEvent({ type:'ORDER_STACK', side:'BID', price: parseFloat(p), time: Date.now() });
-  }
-}
-
-function addEvent(e) {
-  const dup = events.some(x => x.type===e.type && x.price===e.price && Date.now()-x.time<2000);
-  if (dup) return;
-  events.push(e);
-  if (events.length > 300) events = events.slice(-300);
-}
-
-async function startRestPolling() {
-  setInterval(async () => {
-    if (connected) return;
-    try {
-      await loadOrderBook(getSymbol());
-      await loadRecentTrades(getSymbol());
-    } catch(e) {}
-  }, 2000);
-}
-
-async function loadInitialData() {
-  const symbol = getSymbol();
-  console.log(`[INIT] Loading ${symbol.toUpperCase()}...`);
-  for (const tf of Object.keys(TIMEFRAMES)) {
-    await loadHistoricalCandles(symbol, tf, 200);
-  }
-  await loadOrderBook(symbol);
-  await loadRecentTrades(symbol);
-  
-  // Pre-fill DOM history so heatmap shows immediately
-  for (let i = 0; i < 60; i++) {
-    domHistory.push({
-      time: Date.now() - (60-i) * 1000,
-      price: currentPrice,
-      bids: { ...orderBook.bids },
-      asks: { ...orderBook.asks },
-    });
-  }
-  
-  console.log(`[INIT] Done. Price=${currentPrice} Candles=${candles['1m'].length} DOM=${domHistory.length}`);
-}
-
-wss.on('connection', (ws) => {
-  console.log('[CLIENT] Connected');
-  ws.send(JSON.stringify({
-    type: 'INIT',
-    config: CONFIG,
-    instruments: INSTRUMENTS,
-    timeframes: Object.keys(TIMEFRAMES),
-    candles: candles[CONFIG.currentTimeframe] || [],
-    domHistory,
-    orderBook,
-    trades: trades.slice(-200),
-    events: events.slice(-50),
-    currentPrice,
-    connected,
-  }));
-
-  const interval = setInterval(() => {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    const tf = CONFIG.currentTimeframe;
-    const tfCandles = candles[tf] || [];
-    ws.send(JSON.stringify({
-      type: 'UPDATE',
-      orderBook,
-      currentPrice,
-      currentCandle: tfCandles[tfCandles.length-1] || null,
-      domHistory: domHistory.slice(-100),
-      trades: trades.slice(-50),
-      events: events.filter(e => Date.now()-e.time < 30000).slice(-30),
-      connected,
-    }));
-  }, 500);
-
-  ws.on('message', async (msg) => {
-    try {
-      const d = JSON.parse(msg);
-      if (d.type === 'CHANGE_INSTRUMENT' && INSTRUMENTS[d.instrument]) {
-        CONFIG.currentInstrument = d.instrument;
-        orderBook = { bids:{}, asks:{} };
-        previousOrderBook = { bids:{}, asks:{} };
-        trades = []; events = []; domHistory = [];
-        Object.keys(TIMEFRAMES).forEach(tf => { candles[tf] = []; });
-        avgTradeSize = 0; tradeCount = 0; connected = false;
-        await loadInitialData();
-        connectDepthStream();
-        connectTradeStream();
-        ws.send(JSON.stringify({
-          type: 'INSTRUMENT_CHANGED',
-          instrument: d.instrument,
-          candles: candles[CONFIG.currentTimeframe]||[],
-          domHistory,
-          orderBook,
-          currentPrice,
-        }));
-      }
-      if (d.type === 'CHANGE_TIMEFRAME' && TIMEFRAMES[d.timeframe]) {
-        CONFIG.currentTimeframe = d.timeframe;
-        ws.send(JSON.stringify({
-          type: 'TIMEFRAME_CHANGED',
-          timeframe: d.timeframe,
-          candles: candles[d.timeframe]||[],
-        }));
-      }
-    } catch(e) {}
-  });
-
-  ws.on('close', () => { clearInterval(interval); });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, async () => {
-  console.log('\n========================================');
-  console.log('  FREE BOOKMAP - Real Heatmap Style');
-  console.log(`  URL: http://localhost:${PORT}`);
-  console.log('========================================\n');
-  await loadInitialData();
-  connectDepthStream();
-  connectTradeStream();
-  startRestPolling();
+// ============================================================
+// WebSocket Server (RFC 6455 implementation)
+// ============================================================
+const wsClients = new Set();
+
+server.on('upgrade', (req, socket, head) => {
+  if (req.headers.upgrade?.toLowerCase() !== 'websocket') {
+    socket.destroy();
+    return;
+  }
+
+  const key = req.headers['sec-websocket-key'];
+  const acceptKey = crypto
+    .createHash('sha1')
+    .update(key + '258EAFA5-E914-47DA-95CA-5AB4C4F97C13')
+    .digest('base64');
+
+  const headers = [
+    'HTTP/1.1 101 Switching Protocols',
+    'Upgrade: websocket',
+    'Connection: Upgrade',
+    `Sec-WebSocket-Accept: ${acceptKey}`,
+    '',
+    ''
+  ].join('\r\n');
+
+  socket.write(headers);
+
+  const client = { socket, alive: true };
+  wsClients.add(client);
+
+  socket.on('data', (buffer) => {
+    const message = decodeWSFrame(buffer);
+    if (message === null) return;
+    if (message.opcode === 0x8) {
+      wsClients.delete(client);
+      socket.end();
+      return;
+    }
+    if (message.opcode === 0x9) { // ping
+      sendWSFrame(socket, '', 0xA); // pong
+      return;
+    }
+  });
+
+  socket.on('close', () => wsClients.delete(client));
+  socket.on('error', () => wsClients.delete(client));
+});
+
+function decodeWSFrame(buffer) {
+  if (buffer.length < 2) return null;
+  const firstByte = buffer[0];
+  const secondByte = buffer[1];
+  const opcode = firstByte & 0x0F;
+  const masked = (secondByte & 0x80) !== 0;
+  let payloadLength = secondByte & 0x7F;
+  let offset = 2;
+
+  if (payloadLength === 126) {
+    payloadLength = buffer.readUInt16BE(2);
+    offset = 4;
+  } else if (payloadLength === 127) {
+    payloadLength = Number(buffer.readBigUInt64BE(2));
+    offset = 10;
+  }
+
+  let mask = null;
+  if (masked) {
+    mask = buffer.slice(offset, offset + 4);
+    offset += 4;
+  }
+
+  const payload = buffer.slice(offset, offset + payloadLength);
+  if (masked && mask) {
+    for (let i = 0; i < payload.length; i++) {
+      payload[i] ^= mask[i % 4];
+    }
+  }
+
+  return { opcode, payload: payload.toString('utf8') };
+}
+
+function sendWSFrame(socket, data, opcode = 0x1) {
+  const payload = Buffer.from(data, 'utf8');
+  const length = payload.length;
+  let header;
+
+  if (length < 126) {
+    header = Buffer.alloc(2);
+    header[0] = 0x80 | opcode;
+    header[1] = length;
+  } else if (length < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(length), 2);
+  }
+
+  try {
+    socket.write(Buffer.concat([header, payload]));
+  } catch (e) { /* client disconnected */ }
+}
+
+function broadcast(data) {
+  const msg = JSON.stringify(data);
+  for (const client of wsClients) {
+    try {
+      sendWSFrame(client.socket, msg);
+    } catch (e) {
+      wsClients.delete(client);
+    }
+  }
+}
+
+// ============================================================
+// Market Data Simulator
+// ============================================================
+class MarketSimulator {
+  constructor() {
+    this.symbol = 'ES';
+    this.basePrice = 5250.00;
+    this.tickSize = 0.25;
+    this.price = this.basePrice;
+    this.bid = this.basePrice - this.tickSize;
+    this.ask = this.basePrice;
+    this.orderBook = { bids: {}, asks: {} };
+    this.tradeId = 0;
+    this.volatility = 0.0003;
+    this.trend = 0;
+    this.trendDuration = 0;
+    this.totalVolume = 0;
+    this.cvd = 0;
+    this.sessionHigh = this.basePrice;
+    this.sessionLow = this.basePrice;
+    
+    this.initOrderBook();
+  }
+
+  initOrderBook() {
+    // Create realistic order book with 40 levels on each side
+    for (let i = 1; i <= 40; i++) {
+      const bidPrice = this.roundToTick(this.bid - (i - 1) * this.tickSize);
+      const askPrice = this.roundToTick(this.ask + (i - 1) * this.tickSize);
+      
+      // Liquidity distribution: thicker in the middle, some large walls
+      let bidQty = Math.floor(Math.random() * 200 + 50);
+      let askQty = Math.floor(Math.random() * 200 + 50);
+      
+      // Add occasional large orders (liquidity walls)
+      if (Math.random() < 0.08) bidQty = Math.floor(Math.random() * 1000 + 500);
+      if (Math.random() < 0.08) askQty = Math.floor(Math.random() * 1000 + 500);
+      
+      this.orderBook.bids[bidPrice.toFixed(2)] = bidQty;
+      this.orderBook.asks[askPrice.toFixed(2)] = askQty;
+    }
+  }
+
+  roundToTick(price) {
+    return Math.round(price / this.tickSize) * this.tickSize;
+  }
+
+  tick() {
+    const events = [];
+    
+    // Update trend periodically
+    this.trendDuration--;
+    if (this.trendDuration <= 0) {
+      this.trend = (Math.random() - 0.5) * 0.001;
+      this.trendDuration = Math.floor(Math.random() * 100 + 20);
+    }
+
+    // Generate trades
+    const numTrades = Math.random() < 0.3 ? Math.floor(Math.random() * 3 + 1) : 1;
+    
+    for (let t = 0; t < numTrades; t++) {
+      const direction = Math.random() + this.trend;
+      const isBuy = direction > 0.5;
+      
+      // Trade size with fat-tail distribution
+      let size;
+      const r = Math.random();
+      if (r < 0.6) size = Math.floor(Math.random() * 5 + 1);
+      else if (r < 0.9) size = Math.floor(Math.random() * 20 + 5);
+      else if (r < 0.98) size = Math.floor(Math.random() * 50 + 20);
+      else size = Math.floor(Math.random() * 200 + 50);
+
+      const tradePrice = isBuy ? this.ask : this.bid;
+      
+      this.tradeId++;
+      this.totalVolume += size;
+      this.cvd += isBuy ? size : -size;
+      
+      events.push({
+        type: 'trade',
+        id: this.tradeId,
+        price: tradePrice,
+        size: size,
+        side: isBuy ? 'buy' : 'sell',
+        timestamp: Date.now()
+      });
+
+      // Consume liquidity from the book
+      const bookSide = isBuy ? 'asks' : 'bids';
+      const priceKey = tradePrice.toFixed(2);
+      if (this.orderBook[bookSide][priceKey]) {
+        this.orderBook[bookSide][priceKey] -= size;
+        if (this.orderBook[bookSide][priceKey] <= 0) {
+          delete this.orderBook[bookSide][priceKey];
+          // Move price
+          if (isBuy) {
+            this.ask = this.roundToTick(this.ask + this.tickSize);
+            this.bid = this.roundToTick(this.ask - this.tickSize);
+          } else {
+            this.bid = this.roundToTick(this.bid - this.tickSize);
+            this.ask = this.roundToTick(this.bid + this.tickSize);
+          }
+        }
+      }
+    }
+
+    // Update price tracking
+    this.price = this.roundToTick((this.bid + this.ask) / 2);
+    this.sessionHigh = Math.max(this.sessionHigh, this.ask);
+    this.sessionLow = Math.min(this.sessionLow, this.bid);
+
+    // Order book mutations (add/remove/modify orders)
+    this.mutateOrderBook(events);
+
+    // Ensure book has enough levels
+    this.replenishBook();
+
+    // Send order book snapshot periodically embedded in the update
+    events.push({
+      type: 'book',
+      bids: this.getBookLevels('bids', 30),
+      asks: this.getBookLevels('asks', 30),
+      bid: this.bid,
+      ask: this.ask,
+      price: this.price,
+      spread: this.roundToTick(this.ask - this.bid),
+      totalVolume: this.totalVolume,
+      cvd: this.cvd,
+      sessionHigh: this.sessionHigh,
+      sessionLow: this.sessionLow,
+      symbol: this.symbol,
+      timestamp: Date.now()
+    });
+
+    return events;
+  }
+
+  mutateOrderBook(events) {
+    // Randomly add/modify/cancel orders in the book
+    const mutations = Math.floor(Math.random() * 8 + 2);
+    
+    for (let i = 0; i < mutations; i++) {
+      const side = Math.random() > 0.5 ? 'bids' : 'asks';
+      const basePrice = side === 'bids' ? this.bid : this.ask;
+      const offset = Math.floor(Math.random() * 30 + 1) * this.tickSize;
+      const price = side === 'bids' 
+        ? this.roundToTick(basePrice - offset)
+        : this.roundToTick(basePrice + offset);
+      const priceKey = price.toFixed(2);
+
+      const action = Math.random();
+      if (action < 0.4) {
+        // Add/increase order
+        const qty = Math.floor(Math.random() * 150 + 10);
+        this.orderBook[side][priceKey] = (this.orderBook[side][priceKey] || 0) + qty;
+      } else if (action < 0.7) {
+        // Reduce order
+        if (this.orderBook[side][priceKey]) {
+          const reduction = Math.floor(Math.random() * 50 + 1);
+          this.orderBook[side][priceKey] -= reduction;
+          if (this.orderBook[side][priceKey] <= 0) {
+            delete this.orderBook[side][priceKey];
+          }
+        }
+      } else if (action < 0.85) {
+        // Cancel order (spoofing simulation)
+        delete this.orderBook[side][priceKey];
+      } else {
+        // Large order appears (iceberg/wall)
+        const qty = Math.floor(Math.random() * 800 + 200);
+        this.orderBook[side][priceKey] = qty;
+      }
+    }
+  }
+
+  replenishBook() {
+    // Ensure there are always 30+ levels on each side
+    const bidPrices = Object.keys(this.orderBook.bids).map(Number).sort((a, b) => b - a);
+    const askPrices = Object.keys(this.orderBook.asks).map(Number).sort((a, b) => a - b);
+
+    while (bidPrices.length < 30) {
+      const lowestBid = bidPrices.length > 0 ? bidPrices[bidPrices.length - 1] : this.bid;
+      const newPrice = this.roundToTick(lowestBid - this.tickSize);
+      const qty = Math.floor(Math.random() * 200 + 30);
+      this.orderBook.bids[newPrice.toFixed(2)] = qty;
+      bidPrices.push(newPrice);
+    }
+
+    while (askPrices.length < 30) {
+      const highestAsk = askPrices.length > 0 ? askPrices[askPrices.length - 1] : this.ask;
+      const newPrice = this.roundToTick(highestAsk + this.tickSize);
+      const qty = Math.floor(Math.random() * 200 + 30);
+      this.orderBook.asks[newPrice.toFixed(2)] = qty;
+      askPrices.push(newPrice);
+    }
+  }
+
+  getBookLevels(side, depth) {
+    const entries = Object.entries(this.orderBook[side])
+      .map(([price, qty]) => [parseFloat(price), qty]);
+    
+    if (side === 'bids') {
+      entries.sort((a, b) => b[0] - a[0]);
+    } else {
+      entries.sort((a, b) => a[0] - b[0]);
+    }
+    
+    return entries.slice(0, depth);
+  }
+}
+
+// ============================================================
+// Start everything
+// ============================================================
+const simulator = new MarketSimulator();
+
+// Broadcast market data at ~30fps (33ms intervals)
+setInterval(() => {
+  if (wsClients.size > 0) {
+    const events = simulator.tick();
+    broadcast({ events });
+  }
+}, 33);
+
+server.listen(PORT, () => {
+  console.log(`\n  🗺️  Bookmap Clone running at http://localhost:${PORT}\n`);
+  console.log(`  Features:`);
+  console.log(`  - Real-time order book heatmap visualization`);
+  console.log(`  - Volume dots (trade bubbles)`);
+  console.log(`  - DOM (Depth of Market) ladder`);
+  console.log(`  - Volume Profile`);
+  console.log(`  - CVD (Cumulative Volume Delta)`);
+  console.log(`  - Interactive zoom/scroll/crosshair\n`);
 });

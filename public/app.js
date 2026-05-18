@@ -1,455 +1,890 @@
-/**
- * CLEAN TRADINGVIEW + LIQUIDITY HEATMAP
- * - Professional candlestick chart (like TradingView)
- * - Liquidity heatmap behind candles showing where orders sit
- * - Smooth zoom/scroll
- * - Identify support/resistance, see large traders, spot breakouts
- */
+// ============================================================
+// BOOKMAP CLONE - Frontend Application
+// Order Flow Visualization Engine
+// ============================================================
 
-const S = {
-  ws: null, connected: false, serverConnected: false,
-  instruments: {}, currentInstrument: 'BTCUSD', currentTimeframe: '1m',
-  timeframes: [], currentPrice: 0,
-  orderBook: { bids: {}, asks: {} },
-  candles: [], trades: [], events: [], domHistory: [],
-  zoom: 1, targetZoom: 1,
-  scrollX: 0, targetScrollX: 0,
-  dragging: false, dragStartX: 0, dragStartScroll: 0,
-  mouse: null,
-  animSpeed: 0.12,
+'use strict';
+
+// ===== STATE =====
+const state = {
+  connected: false,
+  // Price/book data
+  currentPrice: 0,
+  bid: 0,
+  ask: 0,
+  spread: 0,
+  symbol: 'ES',
+  totalVolume: 0,
+  cvd: 0,
+  sessionHigh: 0,
+  sessionLow: 0,
+  openPrice: 5250.00,
+  
+  // Heatmap settings
+  pixelsPerTick: 8,
+  tickSize: 0.25,
+  scrollSpeed: 2,
+  maxHistory: 800,
+  
+  // Interaction
+  mouseX: -1,
+  mouseY: -1,
+  isDragging: false,
+  priceOffset: 0,
+  
+  // Data buffers
+  heatmapColumns: [],    // Array of { timestamp, bids: Map, asks: Map }
+  trades: [],            // Array of { price, size, side, timestamp, x }
+  volumeProfile: {},     // price -> { buyVol, sellVol }
+  cvdHistory: [],        // Array of cvd values
+  bookSnapshot: null,    // Latest order book
+  
+  // DOM
+  domBids: [],
+  domAsks: [],
+  
+  // Animation
+  frameCount: 0,
+  lastFrameTime: 0
 };
 
-const TF_MS = {'1m':60000,'5m':300000,'15m':900000,'30m':1800000,'1h':3600000,'4h':14400000,'1D':86400000};
-const canvas = document.getElementById('chartCanvas');
-const ctx = canvas.getContext('2d');
-let W, H;
-const AXIS_W = 75;
+// ===== CANVAS REFERENCES =====
+let heatmapCanvas, heatmapCtx;
+let priceCanvas, priceCtx;
+let vpCanvas, vpCtx;
+let cvdCanvas, cvdCtx;
 
-function resize() {
-  const a = document.getElementById('chartArea');
-  W = a.clientWidth; H = a.clientHeight;
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = W * dpr; canvas.height = H * dpr;
-  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+// ===== INITIALIZATION =====
+function init() {
+  setupCanvases();
+  connectWebSocket();
+  setupInteraction();
+  requestAnimationFrame(renderLoop);
 }
-window.addEventListener('resize', resize);
-resize();
 
-// ═══════════════════════════════════════
-// WEBSOCKET
-// ═══════════════════════════════════════
-function connect() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  S.ws = new WebSocket(`${proto}//${location.host}`);
-  S.ws.onopen = () => { S.connected = true; updateUI(); };
-  S.ws.onclose = () => { S.connected = false; updateUI(); setTimeout(connect, 2000); };
-  S.ws.onerror = () => { S.connected = false; };
-  S.ws.onmessage = (e) => {
-    const d = JSON.parse(e.data);
-    if (d.type === 'INIT') {
-      Object.assign(S, {
-        instruments: d.instruments || {},
-        currentInstrument: d.config.currentInstrument,
-        currentTimeframe: d.config.currentTimeframe,
-        timeframes: d.timeframes || [],
-        candles: d.candles || [],
-        domHistory: d.domHistory || [],
-        orderBook: d.orderBook || {bids:{},asks:{}},
-        trades: d.trades || [],
-        events: d.events || [],
-        currentPrice: d.currentPrice,
-        serverConnected: d.connected,
-      });
-      buildButtons();
-    } else if (d.type === 'UPDATE') {
-      S.orderBook = d.orderBook || S.orderBook;
-      S.currentPrice = d.currentPrice || S.currentPrice;
-      S.trades = d.trades || S.trades;
-      S.serverConnected = d.connected;
-      if (d.currentCandle && S.candles.length > 0) {
-        const last = S.candles[S.candles.length-1];
-        if (last.openTime === d.currentCandle.openTime) S.candles[S.candles.length-1] = d.currentCandle;
-        else S.candles.push(d.currentCandle);
-      }
-      if (d.domHistory) {
-        d.domHistory.forEach(snap => {
-          if (!S.domHistory.find(x => x.time === snap.time)) S.domHistory.push(snap);
-        });
-        if (S.domHistory.length > 600) S.domHistory = S.domHistory.slice(-600);
-      }
-      if (d.events) {
-        d.events.forEach(ev => {
-          if (!S.events.find(x => x.time===ev.time && x.type===ev.type)) S.events.push(ev);
-        });
-        if (S.events.length > 200) S.events = S.events.slice(-200);
-      }
-    } else if (d.type === 'INSTRUMENT_CHANGED') {
-      S.currentInstrument = d.instrument;
-      S.candles = d.candles || [];
-      S.domHistory = d.domHistory || [];
-      S.orderBook = d.orderBook || {bids:{},asks:{}};
-      S.currentPrice = d.currentPrice;
-      S.events = []; S.scrollX = 0; S.targetScrollX = 0;
-      setActive('.inst', d.instrument);
-    } else if (d.type === 'TIMEFRAME_CHANGED') {
-      S.currentTimeframe = d.timeframe;
-      S.candles = d.candles || [];
-      S.scrollX = 0; S.targetScrollX = 0;
-      setActive('.tf', d.timeframe);
-      document.getElementById('sTf').textContent = d.timeframe;
-    }
+function setupCanvases() {
+  heatmapCanvas = document.getElementById('heatmap-canvas');
+  heatmapCtx = heatmapCanvas.getContext('2d');
+  
+  priceCanvas = document.getElementById('price-canvas');
+  priceCtx = priceCanvas.getContext('2d');
+  
+  vpCanvas = document.getElementById('vp-canvas');
+  vpCtx = vpCanvas.getContext('2d');
+  
+  cvdCanvas = document.getElementById('cvd-canvas');
+  cvdCtx = cvdCanvas.getContext('2d');
+  
+  resizeCanvases();
+  window.addEventListener('resize', resizeCanvases);
+}
+
+function resizeCanvases() {
+  const container = document.getElementById('heatmap-container');
+  const bottomPanel = document.getElementById('bottom-panel');
+  const heatH = container.clientHeight - bottomPanel.clientHeight;
+  
+  heatmapCanvas.width = container.clientWidth;
+  heatmapCanvas.height = heatH;
+  
+  const priceAxisEl = document.getElementById('price-axis');
+  priceCanvas.width = priceAxisEl.clientWidth;
+  priceCanvas.height = heatH;
+  
+  const vpEl = document.getElementById('volume-profile');
+  vpCanvas.width = vpEl.clientWidth;
+  vpCanvas.height = vpEl.clientHeight;
+  
+  cvdCanvas.width = bottomPanel.clientWidth;
+  cvdCanvas.height = bottomPanel.clientHeight;
+}
+
+
+
+// ===== WEBSOCKET CONNECTION =====
+let ws = null;
+
+function connectWebSocket() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${protocol}//${location.host}`);
+  
+  ws.onopen = () => {
+    state.connected = true;
+    document.getElementById('connection-status').className = 'connected';
+    document.getElementById('connection-status').textContent = 'Connected';
+    document.getElementById('tb-status').textContent = 'Live';
+  };
+  
+  ws.onclose = () => {
+    state.connected = false;
+    document.getElementById('connection-status').className = 'disconnected';
+    document.getElementById('connection-status').textContent = 'Disconnected';
+    document.getElementById('tb-status').textContent = 'Offline';
+    setTimeout(connectWebSocket, 2000);
+  };
+  
+  ws.onerror = () => {
+    ws.close();
+  };
+  
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      processMarketData(data);
+    } catch (e) { /* ignore parse errors */ }
   };
 }
-function send(o) { if (S.ws && S.ws.readyState===1) S.ws.send(JSON.stringify(o)); }
-function lerp(a, b, t) { return a + (b - a) * t; }
 
-// ═══════════════════════════════════════
-// MAIN RENDER
-// ═══════════════════════════════════════
-function render() {
-  S.zoom = lerp(S.zoom, S.targetZoom, S.animSpeed);
-  S.scrollX = lerp(S.scrollX, S.targetScrollX, S.animSpeed);
-  ctx.clearRect(0, 0, W, H);
-
-  if (S.candles.length < 2) {
-    ctx.fillStyle = '#131722'; ctx.fillRect(0, 0, W, H);
-    ctx.font = '14px -apple-system, sans-serif'; ctx.fillStyle = '#5d6d7e'; ctx.textAlign = 'center';
-    ctx.fillText('Connecting to market...', W/2, H/2);
-    requestAnimationFrame(render); return;
-  }
-
-  const drawW = W - AXIS_W;
-  const volH = 50;
-  const chartH = H - volH;
-  const rightPad = drawW * 0.10; // space after last candle
-  const candleArea = drawW - rightPad;
-
-  // Visible candles
-  const numVis = Math.max(15, Math.round(60 / S.zoom));
-  const scroll = Math.round(S.scrollX);
-  const endIdx = Math.max(numVis, S.candles.length - scroll);
-  const startIdx = Math.max(0, endIdx - numVis);
-  const vis = S.candles.slice(startIdx, endIdx);
-  if (vis.length < 2) { requestAnimationFrame(render); return; }
-
-  // Price range
-  let hi = -Infinity, lo = Infinity;
-  vis.forEach(c => { hi = Math.max(hi, c.high); lo = Math.min(lo, c.low); });
-  const pricePad = (hi - lo) * 0.1 || hi * 0.001;
-  hi += pricePad; lo -= pricePad;
-  const priceRange = hi - lo || 1;
-
-  // Time
-  const tStart = vis[0].openTime;
-  const tEnd = vis[vis.length-1].closeTime;
-  const tRange = tEnd - tStart || 1;
-
-  const cW = candleArea / vis.length;
-  const bW = Math.max(1, cW * 0.6);
-
-  // ── Background ──
-  ctx.fillStyle = '#131722';
-  ctx.fillRect(0, 0, W, H);
-
-  // ── Grid ──
-  ctx.strokeStyle = '#1e222d'; ctx.lineWidth = 1;
-  for (let i = 1; i < 6; i++) {
-    const y = (i/6)*chartH;
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(drawW,y); ctx.stroke();
-  }
-
-  // ══════════════════════════════════════════════════════════════
-  // LIQUIDITY HEATMAP (behind candles - FULL WIDTH)
-  // Shows where passive buyers/sellers are sitting
-  // Painted across the ENTIRE chart so it's always visible
-  // ══════════════════════════════════════════════════════════════
+// ===== MARKET DATA PROCESSING =====
+function processMarketData(data) {
+  if (!data.events) return;
   
-  // Find max order size for color scaling
-  let maxQ = 1;
-  Object.values(S.orderBook.bids).forEach(q => { if (q > maxQ) maxQ = q; });
-  Object.values(S.orderBook.asks).forEach(q => { if (q > maxQ) maxQ = q; });
-
-  // Calculate how thick each band should be (based on price level spacing)
-  const prices = [...Object.keys(S.orderBook.bids), ...Object.keys(S.orderBook.asks)].map(Number).sort((a,b)=>a-b);
-  let tickSize = priceRange * 0.005;
-  for (let i = 1; i < prices.length; i++) {
-    const gap = prices[i] - prices[i-1];
-    if (gap > 0 && gap < tickSize) tickSize = gap;
-  }
-  const bandH = Math.max(4, Math.min(14, (tickSize / priceRange) * chartH));
-
-  // Paint current order book as FULL-WIDTH horizontal bands
-  // This is the key: liquidity bands span the ENTIRE chart width
-  // so they're always visible regardless of zoom or scroll
+  let bookUpdate = null;
+  const newTrades = [];
   
-  // BIDS = passive buyers below price (GREEN support zones)
-  Object.entries(S.orderBook.bids).forEach(([p, q]) => {
-    const price = +p;
-    if (price < lo || price > hi) return;
-    const y = ((hi - price) / priceRange) * chartH;
-    const strength = q / maxQ;
-    if (strength < 0.03) return;
-    ctx.fillStyle = liquidityColor(strength);
-    // Full width band from left edge to right edge
-    ctx.fillRect(0, y - bandH/2, drawW, bandH);
-  });
-  
-  // ASKS = passive sellers above price (RED resistance zones)
-  Object.entries(S.orderBook.asks).forEach(([p, q]) => {
-    const price = +p;
-    if (price < lo || price > hi) return;
-    const y = ((hi - price) / priceRange) * chartH;
-    const strength = q / maxQ;
-    if (strength < 0.03) return;
-    ctx.fillStyle = liquidityColor(strength);
-    // Full width band from left edge to right edge
-    ctx.fillRect(0, y - bandH/2, drawW, bandH);
-  });
-
-  // ══════════════════════════════════════════════════════════════
-  // CANDLESTICKS (TradingView style)
-  // ══════════════════════════════════════════════════════════════
-  vis.forEach((c, i) => {
-    const x = i * cW + cW / 2;
-    const green = c.close >= c.open;
-    const oY = ((hi - c.open) / priceRange) * chartH;
-    const cY = ((hi - c.close) / priceRange) * chartH;
-    const hY = ((hi - c.high) / priceRange) * chartH;
-    const lY = ((hi - c.low) / priceRange) * chartH;
-
-    // Wick
-    ctx.strokeStyle = green ? '#26a69a' : '#ef5350';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x, hY); ctx.lineTo(x, lY); ctx.stroke();
-
-    // Body
-    const top = Math.min(oY, cY);
-    const h = Math.max(1, Math.abs(cY - oY));
-    ctx.fillStyle = green ? '#26a69a' : '#ef5350';
-    ctx.fillRect(x - bW/2, top, bW, h);
-  });
-
-  // ── Current price line ──
-  if (S.currentPrice > lo && S.currentPrice < hi) {
-    const py = ((hi - S.currentPrice) / priceRange) * chartH;
-    ctx.setLineDash([4, 3]);
-    ctx.strokeStyle = '#f7a600'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(drawW, py); ctx.stroke();
-    ctx.setLineDash([]);
-    // Tag
-    ctx.fillStyle = '#f7a600';
-    ctx.fillRect(drawW, py - 9, AXIS_W, 18);
-    ctx.fillStyle = '#000'; ctx.font = 'bold 10px Consolas'; ctx.textAlign = 'left';
-    ctx.fillText(fmt(S.currentPrice), drawW + 4, py + 4);
-  }
-
-  // ── Volume bars ──
-  let maxVol = 1;
-  vis.forEach(c => { if (c.volume > maxVol) maxVol = c.volume; });
-  ctx.fillStyle = '#1a1e2e';
-  ctx.fillRect(0, chartH, drawW, volH);
-  
-  vis.forEach((c, i) => {
-    const x = i * cW + cW / 2;
-    const h = (c.volume / maxVol) * (volH - 4);
-    const green = c.close >= c.open;
-    ctx.fillStyle = green ? 'rgba(38,166,154,0.4)' : 'rgba(239,83,80,0.4)';
-    ctx.fillRect(x - bW/2, chartH + volH - h, bW, h);
-  });
-
-  // ── Price axis ──
-  ctx.fillStyle = '#131722'; ctx.fillRect(drawW, 0, AXIS_W, H);
-  ctx.strokeStyle = '#2a2e39'; ctx.beginPath(); ctx.moveTo(drawW,0); ctx.lineTo(drawW,H); ctx.stroke();
-  ctx.font = '10px Consolas'; ctx.fillStyle = '#787b86'; ctx.textAlign = 'left';
-  const nLabels = Math.floor(chartH / 45);
-  for (let i = 0; i <= nLabels; i++) {
-    const y = (i/nLabels) * chartH;
-    ctx.fillText(fmt(hi - (i/nLabels)*priceRange), drawW+5, y+4);
-  }
-
-  // ── Time axis ──
-  ctx.font = '10px Consolas'; ctx.fillStyle = '#787b86'; ctx.textAlign = 'center';
-  for (let i = 0; i <= 4; i++) {
-    const x = (i/4) * candleArea;
-    const t = new Date(tStart + (i/4)*tRange);
-    ctx.fillText(t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}), x, H-4);
-  }
-
-  // ── Crosshair + OHLC ──
-  if (S.mouse && S.mouse.x < drawW && S.mouse.y < chartH) {
-    ctx.setLineDash([2,2]); ctx.strokeStyle='rgba(120,123,134,0.4)'; ctx.lineWidth=0.5;
-    ctx.beginPath(); ctx.moveTo(S.mouse.x,0); ctx.lineTo(S.mouse.x,chartH); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0,S.mouse.y); ctx.lineTo(drawW,S.mouse.y); ctx.stroke();
-    ctx.setLineDash([]);
-    
-    // Price label on axis
-    const cp = hi - (S.mouse.y/chartH)*priceRange;
-    ctx.fillStyle='#363a45'; ctx.fillRect(drawW, S.mouse.y-9, AXIS_W, 18);
-    ctx.fillStyle='#d1d4dc'; ctx.font='10px Consolas'; ctx.textAlign='left';
-    ctx.fillText(fmt(cp), drawW+5, S.mouse.y+4);
-
-    // OHLC tooltip
-    const ci = Math.floor(S.mouse.x / cW);
-    if (ci >= 0 && ci < vis.length) {
-      const c = vis[ci];
-      const green = c.close >= c.open;
-      ctx.font = '11px Consolas'; ctx.textAlign = 'left';
-      const txt = `O ${fmt(c.open)}  H ${fmt(c.high)}  L ${fmt(c.low)}  C ${fmt(c.close)}  V ${c.volume.toFixed(2)}`;
-      ctx.fillStyle = green ? '#26a69a' : '#ef5350';
-      ctx.fillText(txt, 8, 16);
+  for (const evt of data.events) {
+    if (evt.type === 'trade') {
+      newTrades.push(evt);
+      
+      // Update volume profile
+      const priceKey = evt.price.toFixed(2);
+      if (!state.volumeProfile[priceKey]) {
+        state.volumeProfile[priceKey] = { buyVol: 0, sellVol: 0 };
+      }
+      if (evt.side === 'buy') {
+        state.volumeProfile[priceKey].buyVol += evt.size;
+      } else {
+        state.volumeProfile[priceKey].sellVol += evt.size;
+      }
+    } else if (evt.type === 'book') {
+      bookUpdate = evt;
     }
   }
-
-  requestAnimationFrame(render);
-}
-
-// ═══════════════════════════════════════
-// LIQUIDITY COLOR (Bookmap style)
-// Small orders = dark blue, Large orders = bright red/orange
-// ═══════════════════════════════════════
-function liquidityColor(strength) {
-  const s = Math.max(0, Math.min(1, strength));
-  // 7-step gradient: dark → blue → cyan → green → yellow → orange → red
-  if (s < 0.1)  return `rgba(15, 30, 80, 0.5)`;
-  if (s < 0.2)  return `rgba(25, 60, 140, 0.55)`;
-  if (s < 0.35) return `rgba(0, 120, 180, 0.6)`;
-  if (s < 0.5)  return `rgba(0, 180, 160, 0.65)`;
-  if (s < 0.65) return `rgba(180, 200, 0, 0.7)`;
-  if (s < 0.8)  return `rgba(240, 150, 0, 0.75)`;
-  return `rgba(240, 50, 0, 0.85)`;
-}
-
-// ═══════════════════════════════════════
-// SIDE PANEL
-// ═══════════════════════════════════════
-function renderSide() {
-  // DOM
-  const bids = Object.entries(S.orderBook.bids).map(([p,q])=>({price:+p,qty:q})).sort((a,b)=>b.price-a.price).slice(0,10);
-  const asks = Object.entries(S.orderBook.asks).map(([p,q])=>({price:+p,qty:q})).sort((a,b)=>a.price-b.price).slice(0,10);
-  const mq = Math.max(...bids.map(b=>b.qty),...asks.map(a=>a.qty),1);
   
-  let h = '';
-  [...asks].reverse().forEach(l => {
-    h += `<div class="dom-row"><div></div><div class="dom-price" style="color:#ef5350">${fmt(l.price)}</div><div class="dom-ask">${l.qty.toFixed(3)}</div><div class="dom-bar-ask" style="width:${(l.qty/mq)*45}%"></div></div>`;
-  });
-  if (bids.length && asks.length) {
-    const sp = asks[0].price - bids[0].price;
-    h += `<div class="dom-row spread-row"><div></div><div class="dom-price" style="color:#f7a600;font-size:9px">spread ${fmt(sp)}</div><div></div></div>`;
+  // Process book update
+  if (bookUpdate) {
+    state.currentPrice = bookUpdate.price;
+    state.bid = bookUpdate.bid;
+    state.ask = bookUpdate.ask;
+    state.spread = bookUpdate.spread;
+    state.totalVolume = bookUpdate.totalVolume;
+    state.cvd = bookUpdate.cvd;
+    state.sessionHigh = bookUpdate.sessionHigh;
+    state.sessionLow = bookUpdate.sessionLow;
+    state.symbol = bookUpdate.symbol;
+    state.bookSnapshot = bookUpdate;
+    
+    // Set open price on first update
+    if (state.openPrice === 5250.00 && bookUpdate.price) {
+      state.openPrice = bookUpdate.price;
+    }
+    
+    // Store heatmap column
+    const column = {
+      timestamp: bookUpdate.timestamp,
+      bids: new Map(),
+      asks: new Map()
+    };
+    
+    for (const [price, qty] of bookUpdate.bids) {
+      column.bids.set(price.toFixed(2), qty);
+    }
+    for (const [price, qty] of bookUpdate.asks) {
+      column.asks.set(price.toFixed(2), qty);
+    }
+    
+    state.heatmapColumns.push(column);
+    if (state.heatmapColumns.length > state.maxHistory) {
+      state.heatmapColumns.shift();
+    }
+    
+    // Store CVD history
+    state.cvdHistory.push(bookUpdate.cvd);
+    if (state.cvdHistory.length > state.maxHistory) {
+      state.cvdHistory.shift();
+    }
+    
+    // DOM data
+    state.domBids = bookUpdate.bids;
+    state.domAsks = bookUpdate.asks;
   }
-  bids.forEach(l => {
-    h += `<div class="dom-row"><div class="dom-bid">${l.qty.toFixed(3)}</div><div class="dom-price" style="color:#26a69a">${fmt(l.price)}</div><div></div><div class="dom-bar-bid" style="width:${(l.qty/mq)*45}%"></div></div>`;
-  });
-  document.getElementById('dom').innerHTML = h;
-
-  // Events
-  const evs = S.events.slice(-20).reverse();
-  let evH = '';
-  evs.forEach(ev => {
-    const t = new Date(ev.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    let cls='', txt='';
-    if (ev.type==='AGGRESSIVE_BUY') { cls='buy'; txt=`${t} BUY ${ev.size?.toFixed(3)||''} @${fmt(ev.price)}`; }
-    else if (ev.type==='AGGRESSIVE_SELL') { cls='sell'; txt=`${t} SELL ${ev.size?.toFixed(3)||''} @${fmt(ev.price)}`; }
-    else if (ev.type==='ORDER_PULL') { cls='pull'; txt=`${t} ${ev.side} PULLED @${fmt(ev.price)}`; }
-    else if (ev.type==='ORDER_STACK') { cls='stack'; txt=`${t} ${ev.side} STACKED @${fmt(ev.price)}`; }
-    else txt=`${t} ${ev.type}`;
-    evH += `<div class="ev ${cls}">${txt}</div>`;
-  });
-  document.getElementById('events').innerHTML = evH;
-
-  // Stats
-  const bv = Object.values(S.orderBook.bids).reduce((a,b)=>a+b,0);
-  const av = Object.values(S.orderBook.asks).reduce((a,b)=>a+b,0);
-  document.getElementById('sBid').textContent = bv.toFixed(2);
-  document.getElementById('sAsk').textContent = av.toFixed(2);
-  document.getElementById('sBuy').textContent = S.trades.filter(t=>t.isBuy).reduce((a,t)=>a+t.qty,0).toFixed(3);
-  document.getElementById('sSell').textContent = S.trades.filter(t=>!t.isBuy).reduce((a,t)=>a+t.qty,0).toFixed(3);
-  const tot = bv+av;
-  const im = tot>0?((bv-av)/tot*100).toFixed(1):'0';
-  const bP=Object.keys(S.orderBook.bids).map(Number), aP=Object.keys(S.orderBook.asks).map(Number);
-  document.getElementById('sSpread').textContent = fmt(bP.length&&aP.length?Math.min(...aP)-Math.max(...bP):0);
-  const ie=document.getElementById('sImbal');
-  ie.textContent=im+'%'; ie.style.color=im>0?'#26a69a':im<0?'#ef5350':'#787b86';
-
-  // Price
-  const pe = document.getElementById('priceVal');
-  pe.textContent = fmt(S.currentPrice);
-  pe.style.color = S.candles.length>0 && S.currentPrice>=S.candles[S.candles.length-1].open ? '#26a69a' : '#ef5350';
-
-  // Countdown
-  const tfMs = TF_MS[S.currentTimeframe]||60000;
-  const rem = (Math.floor(Date.now()/tfMs)*tfMs+tfMs)-Date.now();
-  document.getElementById('countdown').textContent = `${Math.floor(rem/60000)}:${String(Math.floor((rem%60000)/1000)).padStart(2,'0')}`;
-
-  // Status
-  document.getElementById('connDot').className='conn-dot'+(S.connected?' on':'');
-  document.getElementById('connText').textContent=S.connected?(S.serverConnected?'Live':'REST'):'Offline';
-  document.getElementById('sInst').textContent=S.instruments[S.currentInstrument]?.name||'';
-  document.getElementById('sInfo').textContent=`${S.candles.length}c ${S.domHistory.length}dom`;
-}
-setInterval(renderSide, 300);
-
-// ═══════════════════════════════════════
-// CONTROLS
-// ═══════════════════════════════════════
-function buildButtons() {
-  const ie=document.getElementById('instBtns'); ie.innerHTML='';
-  Object.keys(S.instruments).forEach(k=>{
-    const b=document.createElement('button');
-    b.className='btn inst'+(k===S.currentInstrument?' active':'');
-    b.textContent=k; b.dataset.val=k;
-    b.onclick=()=>{send({type:'CHANGE_INSTRUMENT',instrument:k});setActive('.inst',k);};
-    ie.appendChild(b);
-  });
-  const te=document.getElementById('tfBtns'); te.innerHTML='';
-  S.timeframes.forEach(tf=>{
-    const b=document.createElement('button');
-    b.className='btn tf'+(tf===S.currentTimeframe?' active':'');
-    b.textContent=tf; b.dataset.val=tf;
-    b.onclick=()=>{send({type:'CHANGE_TIMEFRAME',timeframe:tf});setActive('.tf',tf);document.getElementById('sTf').textContent=tf;};
-    te.appendChild(b);
-  });
-}
-function setActive(s,v){document.querySelectorAll(s).forEach(b=>b.classList.toggle('active',b.dataset.val===v));}
-function updateUI(){
-  document.getElementById('connDot').className='conn-dot'+(S.connected?' on':'');
-  document.getElementById('connText').textContent=S.connected?'Connected':'Reconnecting';
-}
-
-// Zoom
-document.getElementById('zoomIn').onclick=()=>{S.targetZoom=Math.min(S.targetZoom*1.4,8);};
-document.getElementById('zoomOut').onclick=()=>{S.targetZoom=Math.max(S.targetZoom/1.4,0.2);};
-document.getElementById('zoomReset').onclick=()=>{S.targetZoom=1;S.targetScrollX=0;};
-
-canvas.addEventListener('wheel',(e)=>{
-  e.preventDefault();
-  S.targetZoom=Math.max(0.2,Math.min(8,S.targetZoom*(e.deltaY<0?1.08:0.92)));
-},{passive:false});
-
-canvas.addEventListener('mousedown',(e)=>{
-  S.dragging=true; S.dragStartX=e.clientX; S.dragStartScroll=S.targetScrollX;
-  canvas.style.cursor='grabbing';
-});
-canvas.addEventListener('mousemove',(e)=>{
-  const r=canvas.getBoundingClientRect();
-  S.mouse={x:e.clientX-r.left,y:e.clientY-r.top};
-  if(S.dragging){
-    const dx=e.clientX-S.dragStartX;
-    const ppc=(W-AXIS_W)*0.9/Math.round(60/S.targetZoom);
-    S.targetScrollX=Math.max(0,Math.min(S.candles.length-20,S.dragStartScroll+dx/ppc));
+  
+  // Process trades
+  for (const trade of newTrades) {
+    state.trades.push({
+      ...trade,
+      column: state.heatmapColumns.length - 1
+    });
   }
-});
-canvas.addEventListener('mouseleave',()=>{S.mouse=null;});
-window.addEventListener('mouseup',()=>{S.dragging=false;canvas.style.cursor='crosshair';});
-canvas.style.cursor='crosshair';
-
-function fmt(p){
-  if(!p||p===0)return'--';
-  if(p>1000)return p.toFixed(2);
-  if(p>1)return p.toFixed(4);
-  return p.toFixed(6);
+  
+  // Limit trades buffer
+  if (state.trades.length > 2000) {
+    state.trades = state.trades.slice(-1500);
+  }
+  
+  // Update toolbar
+  updateToolbar();
 }
 
-// START
-connect();
-render();
+function updateToolbar() {
+  document.getElementById('tb-symbol').textContent = state.symbol;
+  document.getElementById('tb-last').textContent = state.currentPrice.toFixed(2);
+  document.getElementById('tb-bid').textContent = state.bid.toFixed(2);
+  document.getElementById('tb-ask').textContent = state.ask.toFixed(2);
+  document.getElementById('tb-spread').textContent = state.spread.toFixed(2);
+  document.getElementById('tb-volume').textContent = formatNumber(state.totalVolume);
+  document.getElementById('tb-high').textContent = state.sessionHigh.toFixed(2);
+  document.getElementById('tb-low').textContent = state.sessionLow.toFixed(2);
+  
+  const change = state.currentPrice - state.openPrice;
+  const changeEl = document.getElementById('tb-change');
+  const container = document.getElementById('tb-change-container');
+  changeEl.textContent = (change >= 0 ? '+' : '') + change.toFixed(2);
+  container.className = 'toolbar-item ' + (change >= 0 ? 'positive' : 'negative');
+}
+
+function formatNumber(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return n.toString();
+}
+
+
+
+// ===== RENDER LOOP =====
+function renderLoop(timestamp) {
+  const dt = timestamp - state.lastFrameTime;
+  state.lastFrameTime = timestamp;
+  state.frameCount++;
+  
+  renderHeatmap();
+  renderPriceAxis();
+  renderVolumeProfile();
+  renderCVD();
+  
+  // Update DOM ladder at lower frequency
+  if (state.frameCount % 3 === 0) {
+    renderDOM();
+  }
+  
+  requestAnimationFrame(renderLoop);
+}
+
+// ===== HEATMAP RENDERING =====
+function renderHeatmap() {
+  const ctx = heatmapCtx;
+  const W = heatmapCanvas.width;
+  const H = heatmapCanvas.height;
+  
+  if (W === 0 || H === 0) return;
+  
+  // Clear
+  ctx.fillStyle = '#0d0d1a';
+  ctx.fillRect(0, 0, W, H);
+  
+  if (state.heatmapColumns.length === 0) {
+    ctx.fillStyle = '#404060';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for market data...', W / 2, H / 2);
+    return;
+  }
+  
+  const ppt = state.pixelsPerTick;
+  const tickSize = state.tickSize;
+  const centerPrice = state.currentPrice + state.priceOffset;
+  const centerY = H / 2;
+  
+  // Calculate visible price range
+  const priceRange = (H / ppt) * tickSize;
+  const topPrice = centerPrice + priceRange / 2;
+  const bottomPrice = centerPrice - priceRange / 2;
+  
+  // Column width
+  const colWidth = Math.max(2, Math.floor(W / Math.min(state.heatmapColumns.length, state.maxHistory)));
+  const visibleColumns = Math.min(state.heatmapColumns.length, Math.floor(W / colWidth));
+  const startCol = Math.max(0, state.heatmapColumns.length - visibleColumns);
+  
+  // Find max quantity for color scaling
+  let maxQty = 100;
+  for (let i = startCol; i < state.heatmapColumns.length; i++) {
+    const col = state.heatmapColumns[i];
+    for (const qty of col.bids.values()) maxQty = Math.max(maxQty, qty);
+    for (const qty of col.asks.values()) maxQty = Math.max(maxQty, qty);
+  }
+  
+  // Draw heatmap columns
+  for (let i = startCol; i < state.heatmapColumns.length; i++) {
+    const col = state.heatmapColumns[i];
+    const x = (i - startCol) * colWidth;
+    
+    // Draw bids (below/at bid)
+    for (const [priceStr, qty] of col.bids) {
+      const price = parseFloat(priceStr);
+      if (price < bottomPrice || price > topPrice) continue;
+      
+      const y = centerY - ((price - centerPrice) / tickSize) * ppt;
+      const intensity = Math.min(qty / maxQty, 1);
+      const color = getHeatColor(intensity, 'bid');
+      
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y - ppt / 2, colWidth - 1, ppt);
+    }
+    
+    // Draw asks (above/at ask)
+    for (const [priceStr, qty] of col.asks) {
+      const price = parseFloat(priceStr);
+      if (price < bottomPrice || price > topPrice) continue;
+      
+      const y = centerY - ((price - centerPrice) / tickSize) * ppt;
+      const intensity = Math.min(qty / maxQty, 1);
+      const color = getHeatColor(intensity, 'ask');
+      
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y - ppt / 2, colWidth - 1, ppt);
+    }
+  }
+  
+  // Draw price line (current price)
+  const priceY = centerY - ((state.currentPrice - centerPrice) / tickSize) * ppt;
+  ctx.strokeStyle = 'rgba(79, 195, 247, 0.6)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(0, priceY);
+  ctx.lineTo(W, priceY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  
+  // Draw bid/ask lines
+  const bidY = centerY - ((state.bid - centerPrice) / tickSize) * ppt;
+  const askY = centerY - ((state.ask - centerPrice) / tickSize) * ppt;
+  
+  ctx.strokeStyle = 'rgba(76, 175, 80, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, bidY);
+  ctx.lineTo(W, bidY);
+  ctx.stroke();
+  
+  ctx.strokeStyle = 'rgba(244, 67, 54, 0.5)';
+  ctx.beginPath();
+  ctx.moveTo(0, askY);
+  ctx.lineTo(W, askY);
+  ctx.stroke();
+  
+  // Draw volume dots (trades)
+  renderVolumeDots(ctx, startCol, colWidth, centerPrice, centerY, ppt, tickSize);
+  
+  // Draw crosshair
+  renderCrosshair(ctx, W, H, centerPrice, centerY, ppt, tickSize);
+  
+  // Draw grid lines
+  renderGrid(ctx, W, H, centerPrice, centerY, ppt, tickSize);
+}
+
+// ===== HEATMAP COLOR FUNCTION =====
+function getHeatColor(intensity, side) {
+  // Creates a gradient from dark to bright
+  // Bid: dark blue -> cyan -> white
+  // Ask: dark red -> orange -> yellow -> white
+  
+  if (side === 'bid') {
+    if (intensity < 0.2) {
+      const t = intensity / 0.2;
+      return `rgba(0, ${Math.floor(30 + t * 50)}, ${Math.floor(60 + t * 80)}, ${0.3 + t * 0.3})`;
+    } else if (intensity < 0.5) {
+      const t = (intensity - 0.2) / 0.3;
+      return `rgba(0, ${Math.floor(80 + t * 100)}, ${Math.floor(140 + t * 60)}, ${0.6 + t * 0.2})`;
+    } else if (intensity < 0.8) {
+      const t = (intensity - 0.5) / 0.3;
+      return `rgba(${Math.floor(t * 100)}, ${Math.floor(180 + t * 50)}, ${Math.floor(200 + t * 55)}, ${0.8 + t * 0.1})`;
+    } else {
+      const t = (intensity - 0.8) / 0.2;
+      return `rgba(${Math.floor(100 + t * 155)}, ${Math.floor(230 + t * 25)}, 255, ${0.9 + t * 0.1})`;
+    }
+  } else {
+    if (intensity < 0.2) {
+      const t = intensity / 0.2;
+      return `rgba(${Math.floor(60 + t * 80)}, ${Math.floor(10 + t * 20)}, 0, ${0.3 + t * 0.3})`;
+    } else if (intensity < 0.5) {
+      const t = (intensity - 0.2) / 0.3;
+      return `rgba(${Math.floor(140 + t * 60)}, ${Math.floor(30 + t * 50)}, 0, ${0.6 + t * 0.2})`;
+    } else if (intensity < 0.8) {
+      const t = (intensity - 0.5) / 0.3;
+      return `rgba(${Math.floor(200 + t * 55)}, ${Math.floor(80 + t * 100)}, ${Math.floor(t * 50)}, ${0.8 + t * 0.1})`;
+    } else {
+      const t = (intensity - 0.8) / 0.2;
+      return `rgba(255, ${Math.floor(180 + t * 75)}, ${Math.floor(50 + t * 150)}, ${0.9 + t * 0.1})`;
+    }
+  }
+}
+
+// ===== VOLUME DOTS =====
+function renderVolumeDots(ctx, startCol, colWidth, centerPrice, centerY, ppt, tickSize) {
+  for (const trade of state.trades) {
+    const colIdx = trade.column;
+    if (colIdx < startCol) continue;
+    
+    const x = (colIdx - startCol) * colWidth + colWidth / 2;
+    const y = centerY - ((trade.price - centerPrice) / tickSize) * ppt;
+    
+    // Skip if off screen
+    if (x < 0 || x > heatmapCanvas.width) continue;
+    if (y < -20 || y > heatmapCanvas.height + 20) continue;
+    
+    // Size proportional to trade volume (log scale)
+    const radius = Math.min(Math.max(2, Math.log2(trade.size + 1) * 2.5), 25);
+    
+    // Color based on buy/sell
+    const isBuy = trade.side === 'buy';
+    const alpha = Math.min(0.4 + (trade.size / 100) * 0.4, 0.85);
+    
+    // Glow effect for large trades
+    if (trade.size > 30) {
+      const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius * 1.5);
+      if (isBuy) {
+        gradient.addColorStop(0, `rgba(76, 175, 80, ${alpha})`);
+        gradient.addColorStop(0.6, `rgba(76, 175, 80, ${alpha * 0.5})`);
+        gradient.addColorStop(1, 'rgba(76, 175, 80, 0)');
+      } else {
+        gradient.addColorStop(0, `rgba(244, 67, 54, ${alpha})`);
+        gradient.addColorStop(0.6, `rgba(244, 67, 54, ${alpha * 0.5})`);
+        gradient.addColorStop(1, 'rgba(244, 67, 54, 0)');
+      }
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(x, y, radius * 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    // Main dot
+    ctx.fillStyle = isBuy 
+      ? `rgba(76, 175, 80, ${alpha})` 
+      : `rgba(244, 67, 54, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Border
+    ctx.strokeStyle = isBuy
+      ? `rgba(129, 199, 132, ${alpha})`
+      : `rgba(239, 154, 154, ${alpha})`;
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+}
+
+
+
+// ===== GRID RENDERING =====
+function renderGrid(ctx, W, H, centerPrice, centerY, ppt, tickSize) {
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
+  ctx.lineWidth = 0.5;
+  
+  // Horizontal grid (price levels)
+  const gridTicks = Math.max(4, Math.floor(20 / ppt) * 4); // Every N ticks
+  const topPrice = centerPrice + (centerY / ppt) * tickSize;
+  const startPrice = Math.floor(topPrice / (tickSize * gridTicks)) * tickSize * gridTicks;
+  
+  for (let price = startPrice; ; price -= tickSize * gridTicks) {
+    const y = centerY - ((price - centerPrice) / tickSize) * ppt;
+    if (y > H) break;
+    if (y < 0) continue;
+    
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+  
+  // Vertical grid (time)
+  const colWidth = Math.max(2, Math.floor(W / Math.min(state.heatmapColumns.length, state.maxHistory)));
+  const timeGrid = Math.floor(100 / colWidth);
+  for (let i = 0; i < W; i += timeGrid * colWidth) {
+    ctx.beginPath();
+    ctx.moveTo(i, 0);
+    ctx.lineTo(i, H);
+    ctx.stroke();
+  }
+}
+
+// ===== CROSSHAIR =====
+function renderCrosshair(ctx, W, H, centerPrice, centerY, ppt, tickSize) {
+  if (state.mouseX < 0 || state.mouseY < 0) return;
+  
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.lineWidth = 0.5;
+  ctx.setLineDash([2, 2]);
+  
+  // Horizontal line
+  ctx.beginPath();
+  ctx.moveTo(0, state.mouseY);
+  ctx.lineTo(W, state.mouseY);
+  ctx.stroke();
+  
+  // Vertical line
+  ctx.beginPath();
+  ctx.moveTo(state.mouseX, 0);
+  ctx.lineTo(state.mouseX, H);
+  ctx.stroke();
+  
+  ctx.setLineDash([]);
+  
+  // Price label
+  const hoverPrice = centerPrice + ((centerY - state.mouseY) / ppt) * tickSize;
+  const priceLabel = document.getElementById('price-label');
+  priceLabel.style.display = 'block';
+  priceLabel.style.top = state.mouseY + 'px';
+  priceLabel.textContent = hoverPrice.toFixed(2);
+  
+  // Time label
+  const timeLabel = document.getElementById('time-label');
+  timeLabel.style.display = 'block';
+  timeLabel.style.left = state.mouseX + 'px';
+  const now = new Date();
+  timeLabel.textContent = now.toLocaleTimeString();
+}
+
+// ===== PRICE AXIS =====
+function renderPriceAxis() {
+  const ctx = priceCtx;
+  const W = priceCanvas.width;
+  const H = priceCanvas.height;
+  
+  if (W === 0 || H === 0) return;
+  
+  ctx.fillStyle = '#161630';
+  ctx.fillRect(0, 0, W, H);
+  
+  if (!state.currentPrice) return;
+  
+  const ppt = state.pixelsPerTick;
+  const tickSize = state.tickSize;
+  const centerPrice = state.currentPrice + state.priceOffset;
+  const centerY = H / 2;
+  
+  // Draw price labels
+  const gridTicks = Math.max(4, Math.floor(20 / ppt) * 4);
+  const topPrice = centerPrice + (centerY / ppt) * tickSize;
+  const startPrice = Math.floor(topPrice / (tickSize * gridTicks)) * tickSize * gridTicks;
+  
+  ctx.fillStyle = '#a0a0b0';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  
+  for (let price = startPrice; ; price -= tickSize * gridTicks) {
+    const y = centerY - ((price - centerPrice) / tickSize) * ppt;
+    if (y > H) break;
+    if (y < 0) continue;
+    
+    ctx.fillStyle = '#606080';
+    ctx.fillRect(0, y, 4, 1);
+    ctx.fillStyle = '#a0a0b0';
+    ctx.fillText(price.toFixed(2), 6, y + 3);
+  }
+  
+  // Current price marker
+  const priceY = centerY - ((state.currentPrice - centerPrice) / tickSize) * ppt;
+  ctx.fillStyle = '#4fc3f7';
+  ctx.fillRect(0, priceY - 8, W, 16);
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText(state.currentPrice.toFixed(2), 4, priceY + 4);
+  
+  // Bid marker
+  const bidY = centerY - ((state.bid - centerPrice) / tickSize) * ppt;
+  ctx.fillStyle = 'rgba(76, 175, 80, 0.7)';
+  ctx.fillRect(0, bidY - 1, W, 2);
+  
+  // Ask marker
+  const askY = centerY - ((state.ask - centerPrice) / tickSize) * ppt;
+  ctx.fillStyle = 'rgba(244, 67, 54, 0.7)';
+  ctx.fillRect(0, askY - 1, W, 2);
+}
+
+// ===== VOLUME PROFILE =====
+function renderVolumeProfile() {
+  const ctx = vpCtx;
+  const W = vpCanvas.width;
+  const H = vpCanvas.height;
+  
+  if (W === 0 || H === 0) return;
+  
+  ctx.fillStyle = '#12122a';
+  ctx.fillRect(0, 0, W, H);
+  
+  if (!state.currentPrice) return;
+  
+  const ppt = state.pixelsPerTick;
+  const tickSize = state.tickSize;
+  const centerPrice = state.currentPrice + state.priceOffset;
+  const centerY = H / 2;
+  
+  // Find max volume for scaling
+  let maxVol = 1;
+  for (const key of Object.keys(state.volumeProfile)) {
+    const vp = state.volumeProfile[key];
+    maxVol = Math.max(maxVol, vp.buyVol + vp.sellVol);
+  }
+  
+  // Draw volume bars
+  for (const [priceStr, vp] of Object.entries(state.volumeProfile)) {
+    const price = parseFloat(priceStr);
+    const y = centerY - ((price - centerPrice) / tickSize) * ppt;
+    
+    if (y < -ppt || y > H + ppt) continue;
+    
+    const totalVol = vp.buyVol + vp.sellVol;
+    const barWidth = (totalVol / maxVol) * (W - 4);
+    const buyWidth = (vp.buyVol / totalVol) * barWidth;
+    const sellWidth = barWidth - buyWidth;
+    
+    // Buy portion (green)
+    ctx.fillStyle = 'rgba(76, 175, 80, 0.6)';
+    ctx.fillRect(W - barWidth, y - ppt / 2 + 1, buyWidth, ppt - 2);
+    
+    // Sell portion (red)
+    ctx.fillStyle = 'rgba(244, 67, 54, 0.6)';
+    ctx.fillRect(W - sellWidth, y - ppt / 2 + 1, sellWidth, ppt - 2);
+  }
+  
+  // POC (Point of Control) line
+  let pocPrice = state.currentPrice;
+  let pocVol = 0;
+  for (const [priceStr, vp] of Object.entries(state.volumeProfile)) {
+    const total = vp.buyVol + vp.sellVol;
+    if (total > pocVol) {
+      pocVol = total;
+      pocPrice = parseFloat(priceStr);
+    }
+  }
+  
+  const pocY = centerY - ((pocPrice - centerPrice) / tickSize) * ppt;
+  ctx.strokeStyle = 'rgba(255, 213, 79, 0.7)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(0, pocY);
+  ctx.lineTo(W, pocY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  
+  // Label
+  ctx.fillStyle = '#606080';
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('VOL PROFILE', W / 2, 12);
+}
+
+
+
+// ===== CVD (Cumulative Volume Delta) =====
+function renderCVD() {
+  const ctx = cvdCtx;
+  const W = cvdCanvas.width;
+  const H = cvdCanvas.height;
+  
+  if (W === 0 || H === 0) return;
+  
+  ctx.fillStyle = '#0d0d1a';
+  ctx.fillRect(0, 0, W, H);
+  
+  if (state.cvdHistory.length < 2) return;
+  
+  // Find min/max for scaling
+  let minCvd = Infinity, maxCvd = -Infinity;
+  for (const v of state.cvdHistory) {
+    minCvd = Math.min(minCvd, v);
+    maxCvd = Math.max(maxCvd, v);
+  }
+  
+  const range = maxCvd - minCvd || 1;
+  const padding = 8;
+  const drawH = H - padding * 2;
+  const drawW = W - 4;
+  
+  // Zero line
+  const zeroY = padding + drawH - ((0 - minCvd) / range) * drawH;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(0, zeroY);
+  ctx.lineTo(W, zeroY);
+  ctx.stroke();
+  
+  // Draw CVD line
+  ctx.beginPath();
+  const step = drawW / (state.cvdHistory.length - 1);
+  
+  for (let i = 0; i < state.cvdHistory.length; i++) {
+    const x = 2 + i * step;
+    const y = padding + drawH - ((state.cvdHistory[i] - minCvd) / range) * drawH;
+    
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  
+  // Gradient stroke
+  const lastCvd = state.cvdHistory[state.cvdHistory.length - 1];
+  const cvdColor = lastCvd >= 0 ? 'rgba(76, 175, 80, 0.9)' : 'rgba(244, 67, 54, 0.9)';
+  ctx.strokeStyle = cvdColor;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  
+  // Fill area
+  const lastX = 2 + (state.cvdHistory.length - 1) * step;
+  ctx.lineTo(lastX, zeroY);
+  ctx.lineTo(2, zeroY);
+  ctx.closePath();
+  
+  const fillColor = lastCvd >= 0 ? 'rgba(76, 175, 80, 0.1)' : 'rgba(244, 67, 54, 0.1)';
+  ctx.fillStyle = fillColor;
+  ctx.fill();
+  
+  // Labels
+  ctx.fillStyle = '#606080';
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('CVD', 4, 10);
+  
+  ctx.textAlign = 'right';
+  ctx.fillStyle = cvdColor;
+  ctx.fillText(formatNumber(lastCvd), W - 4, 10);
+}
+
+// ===== DOM LADDER =====
+function renderDOM() {
+  const container = document.getElementById('dom-ladder');
+  
+  if (!state.domBids.length || !state.domAsks.length) {
+    container.innerHTML = '<div style="text-align:center;padding:20px;color:#606080;">Waiting for data...</div>';
+    return;
+  }
+  
+  // Find max qty for bar scaling
+  let maxQty = 1;
+  for (const [, qty] of state.domAsks) maxQty = Math.max(maxQty, qty);
+  for (const [, qty] of state.domBids) maxQty = Math.max(maxQty, qty);
+  
+  let html = '<table>';
+  
+  // Show asks (reversed, highest first at top)
+  const visibleAsks = state.domAsks.slice(0, 15).reverse();
+  for (const [price, qty] of visibleAsks) {
+    const barWidth = (qty / maxQty) * 100;
+    const vol = state.volumeProfile[price.toFixed(2)];
+    const tradedVol = vol ? vol.buyVol + vol.sellVol : 0;
+    
+    html += `<tr class="ask-row">
+      <td class="qty-cell ask-qty">${qty}</td>
+      <td class="price-cell">${price.toFixed(2)}</td>
+      <td class="qty-cell" style="position:relative;">
+        <div class="bar-bg ask-bar" style="width:${barWidth}%"></div>
+      </td>
+      <td class="vol-cell">${tradedVol > 0 ? formatNumber(tradedVol) : ''}</td>
+    </tr>`;
+  }
+  
+  // Spread row
+  html += `<tr class="spread-row">
+    <td colspan="4">▲ Spread: ${state.spread.toFixed(2)} ▼</td>
+  </tr>`;
+  
+  // Show bids
+  const visibleBids = state.domBids.slice(0, 15);
+  for (const [price, qty] of visibleBids) {
+    const barWidth = (qty / maxQty) * 100;
+    const vol = state.volumeProfile[price.toFixed(2)];
+    const tradedVol = vol ? vol.buyVol + vol.sellVol : 0;
+    
+    html += `<tr class="bid-row">
+      <td class="qty-cell bid-qty">${qty}</td>
+      <td class="price-cell">${price.toFixed(2)}</td>
+      <td class="qty-cell" style="position:relative;">
+        <div class="bar-bg bid-bar" style="width:${barWidth}%"></div>
+      </td>
+      <td class="vol-cell">${tradedVol > 0 ? formatNumber(tradedVol) : ''}</td>
+    </tr>`;
+  }
+  
+  html += '</table>';
+  container.innerHTML = html;
+}
+
+// ===== INTERACTION =====
+function setupInteraction() {
+  const container = document.getElementById('heatmap-container');
+  
+  // Mouse move (crosshair)
+  container.addEventListener('mousemove', (e) => {
+    const rect = heatmapCanvas.getBoundingClientRect();
+    state.mouseX = e.clientX - rect.left;
+    state.mouseY = e.clientY - rect.top;
+    
+    if (state.isDragging) {
+      const dy = e.movementY;
+      state.priceOffset += (dy / state.pixelsPerTick) * state.tickSize;
+    }
+  });
+  
+  container.addEventListener('mouseleave', () => {
+    state.mouseX = -1;
+    state.mouseY = -1;
+    document.getElementById('price-label').style.display = 'none';
+    document.getElementById('time-label').style.display = 'none';
+  });
+  
+  // Mouse drag (pan price)
+  container.addEventListener('mousedown', (e) => {
+    if (e.button === 0) {
+      state.isDragging = true;
+      container.style.cursor = 'grabbing';
+    }
+  });
+  
+  window.addEventListener('mouseup', () => {
+    state.isDragging = false;
+    document.getElementById('heatmap-container').style.cursor = 'crosshair';
+  });
+  
+  // Scroll (zoom)
+  container.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -1 : 1;
+    state.pixelsPerTick = Math.max(2, Math.min(30, state.pixelsPerTick + delta));
+  }, { passive: false });
+  
+  // Zoom buttons
+  document.getElementById('zoom-in').addEventListener('click', () => {
+    state.pixelsPerTick = Math.min(30, state.pixelsPerTick + 2);
+  });
+  
+  document.getElementById('zoom-out').addEventListener('click', () => {
+    state.pixelsPerTick = Math.max(2, state.pixelsPerTick - 2);
+  });
+  
+  document.getElementById('zoom-reset').addEventListener('click', () => {
+    state.pixelsPerTick = 8;
+    state.priceOffset = 0;
+  });
+  
+  // Keyboard shortcuts
+  window.addEventListener('keydown', (e) => {
+    switch (e.key) {
+      case '+':
+      case '=':
+        state.pixelsPerTick = Math.min(30, state.pixelsPerTick + 1);
+        break;
+      case '-':
+        state.pixelsPerTick = Math.max(2, state.pixelsPerTick - 1);
+        break;
+      case 'Home':
+        state.priceOffset = 0;
+        break;
+    }
+  });
+}
+
+// ===== START =====
+window.addEventListener('DOMContentLoaded', init);
