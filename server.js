@@ -1,15 +1,17 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 // ============================================================
-// BOOKMAP CLONE - Server with WebSocket & Market Data Simulator
+// BOOKMAP CLONE - LIVE XAUUSD via Binance PAXG/USDT
+// Zero dependencies - uses Node.js built-in modules only
 // ============================================================
 
 const PORT = 3000;
 
-// MIME types for static file serving
+// MIME types
 const MIME_TYPES = {
   '.html': 'text/html',
   '.js': 'application/javascript',
@@ -19,7 +21,9 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon'
 };
 
-// Create HTTP server for static files
+// ============================================================
+// HTTP Server (static files)
+// ============================================================
 const server = http.createServer((req, res) => {
   let filePath = path.join(__dirname, 'public', req.url === '/' ? 'index.html' : req.url);
   const ext = path.extname(filePath);
@@ -37,7 +41,7 @@ const server = http.createServer((req, res) => {
 });
 
 // ============================================================
-// WebSocket Server (RFC 6455 implementation)
+// WebSocket Server (RFC 6455)
 // ============================================================
 const wsClients = new Set();
 
@@ -75,8 +79,8 @@ server.on('upgrade', (req, socket, head) => {
       socket.end();
       return;
     }
-    if (message.opcode === 0x9) { // ping
-      sendWSFrame(socket, '', 0xA); // pong
+    if (message.opcode === 0x9) {
+      sendWSFrame(socket, '', 0xA);
       return;
     }
   });
@@ -95,19 +99,23 @@ function decodeWSFrame(buffer) {
   let offset = 2;
 
   if (payloadLength === 126) {
+    if (buffer.length < 4) return null;
     payloadLength = buffer.readUInt16BE(2);
     offset = 4;
   } else if (payloadLength === 127) {
+    if (buffer.length < 10) return null;
     payloadLength = Number(buffer.readBigUInt64BE(2));
     offset = 10;
   }
 
   let mask = null;
   if (masked) {
+    if (buffer.length < offset + 4) return null;
     mask = buffer.slice(offset, offset + 4);
     offset += 4;
   }
 
+  if (buffer.length < offset + payloadLength) return null;
   const payload = buffer.slice(offset, offset + payloadLength);
   if (masked && mask) {
     for (let i = 0; i < payload.length; i++) {
@@ -156,236 +164,408 @@ function broadcast(data) {
 }
 
 // ============================================================
-// Market Data Simulator
+// Binance WebSocket Client (connects to live market data)
+// Using PAXG/USDT as gold proxy for XAUUSD
 // ============================================================
-class MarketSimulator {
-  constructor() {
-    this.symbol = 'ES';
-    this.basePrice = 5250.00;
-    this.tickSize = 0.25;
-    this.price = this.basePrice;
-    this.bid = this.basePrice - this.tickSize;
-    this.ask = this.basePrice;
-    this.orderBook = { bids: {}, asks: {} };
-    this.tradeId = 0;
-    this.volatility = 0.0003;
-    this.trend = 0;
-    this.trendDuration = 0;
-    this.totalVolume = 0;
-    this.cvd = 0;
-    this.sessionHigh = this.basePrice;
-    this.sessionLow = this.basePrice;
-    
-    this.initOrderBook();
-  }
 
-  initOrderBook() {
-    // Create realistic order book with 40 levels on each side
-    for (let i = 1; i <= 40; i++) {
-      const bidPrice = this.roundToTick(this.bid - (i - 1) * this.tickSize);
-      const askPrice = this.roundToTick(this.ask + (i - 1) * this.tickSize);
-      
-      // Liquidity distribution: thicker in the middle, some large walls
-      let bidQty = Math.floor(Math.random() * 200 + 50);
-      let askQty = Math.floor(Math.random() * 200 + 50);
-      
-      // Add occasional large orders (liquidity walls)
-      if (Math.random() < 0.08) bidQty = Math.floor(Math.random() * 1000 + 500);
-      if (Math.random() < 0.08) askQty = Math.floor(Math.random() * 1000 + 500);
-      
-      this.orderBook.bids[bidPrice.toFixed(2)] = bidQty;
-      this.orderBook.asks[askPrice.toFixed(2)] = askQty;
-    }
-  }
+const BINANCE_SYMBOL = 'paxgusdt';
+const DISPLAY_SYMBOL = 'XAUUSD';
+const TICK_SIZE = 0.01; // Gold ticks in cents
 
-  roundToTick(price) {
-    return Math.round(price / this.tickSize) * this.tickSize;
-  }
+// Market state
+let orderBook = { bids: {}, asks: {} };
+let currentPrice = 0;
+let totalVolume = 0;
+let cvd = 0;
+let sessionHigh = 0;
+let sessionLow = Infinity;
+let openPrice = 0;
+let tradeId = 0;
+let binanceConnected = false;
 
-  tick() {
-    const events = [];
-    
-    // Update trend periodically
-    this.trendDuration--;
-    if (this.trendDuration <= 0) {
-      this.trend = (Math.random() - 0.5) * 0.001;
-      this.trendDuration = Math.floor(Math.random() * 100 + 20);
-    }
+// Buffers for client updates
+let pendingTrades = [];
+let lastBookBroadcast = 0;
 
-    // Generate trades
-    const numTrades = Math.random() < 0.3 ? Math.floor(Math.random() * 3 + 1) : 1;
-    
-    for (let t = 0; t < numTrades; t++) {
-      const direction = Math.random() + this.trend;
-      const isBuy = direction > 0.5;
-      
-      // Trade size with fat-tail distribution
-      let size;
-      const r = Math.random();
-      if (r < 0.6) size = Math.floor(Math.random() * 5 + 1);
-      else if (r < 0.9) size = Math.floor(Math.random() * 20 + 5);
-      else if (r < 0.98) size = Math.floor(Math.random() * 50 + 20);
-      else size = Math.floor(Math.random() * 200 + 50);
-
-      const tradePrice = isBuy ? this.ask : this.bid;
-      
-      this.tradeId++;
-      this.totalVolume += size;
-      this.cvd += isBuy ? size : -size;
-      
-      events.push({
-        type: 'trade',
-        id: this.tradeId,
-        price: tradePrice,
-        size: size,
-        side: isBuy ? 'buy' : 'sell',
-        timestamp: Date.now()
-      });
-
-      // Consume liquidity from the book
-      const bookSide = isBuy ? 'asks' : 'bids';
-      const priceKey = tradePrice.toFixed(2);
-      if (this.orderBook[bookSide][priceKey]) {
-        this.orderBook[bookSide][priceKey] -= size;
-        if (this.orderBook[bookSide][priceKey] <= 0) {
-          delete this.orderBook[bookSide][priceKey];
-          // Move price
-          if (isBuy) {
-            this.ask = this.roundToTick(this.ask + this.tickSize);
-            this.bid = this.roundToTick(this.ask - this.tickSize);
-          } else {
-            this.bid = this.roundToTick(this.bid - this.tickSize);
-            this.ask = this.roundToTick(this.bid + this.tickSize);
+// ============================================================
+// Connect to Binance Depth Stream (Order Book)
+// ============================================================
+function connectDepthStream() {
+  const url = `wss://stream.binance.com:9443/ws/${BINANCE_SYMBOL}@depth20@100ms`;
+  
+  console.log(`[WS] Connecting to Binance depth stream: ${BINANCE_SYMBOL}...`);
+  
+  const ws = createWebSocketClient(url, {
+    onOpen: () => {
+      console.log(`[WS] ✓ Depth stream connected`);
+      binanceConnected = true;
+    },
+    onMessage: (data) => {
+      try {
+        const msg = JSON.parse(data);
+        if (msg.bids && msg.asks) {
+          orderBook.bids = {};
+          orderBook.asks = {};
+          
+          msg.bids.forEach(([price, qty]) => {
+            const p = parseFloat(price);
+            const q = parseFloat(qty);
+            if (q > 0) orderBook.bids[p.toFixed(2)] = q;
+          });
+          
+          msg.asks.forEach(([price, qty]) => {
+            const p = parseFloat(price);
+            const q = parseFloat(qty);
+            if (q > 0) orderBook.asks[p.toFixed(2)] = q;
+          });
+          
+          // Calculate mid price
+          const bidPrices = Object.keys(orderBook.bids).map(Number);
+          const askPrices = Object.keys(orderBook.asks).map(Number);
+          if (bidPrices.length && askPrices.length) {
+            const bestBid = Math.max(...bidPrices);
+            const bestAsk = Math.min(...askPrices);
+            currentPrice = (bestBid + bestAsk) / 2;
+            
+            if (openPrice === 0) openPrice = currentPrice;
+            sessionHigh = Math.max(sessionHigh, bestAsk);
+            if (sessionLow === Infinity) sessionLow = bestBid;
+            sessionLow = Math.min(sessionLow, bestBid);
           }
         }
-      }
+      } catch (e) { /* ignore */ }
+    },
+    onClose: () => {
+      console.log('[WS] Depth stream disconnected, reconnecting...');
+      binanceConnected = false;
+      setTimeout(connectDepthStream, 3000);
+    },
+    onError: (err) => {
+      console.log('[WS] Depth stream error:', err.message || 'unknown');
     }
-
-    // Update price tracking
-    this.price = this.roundToTick((this.bid + this.ask) / 2);
-    this.sessionHigh = Math.max(this.sessionHigh, this.ask);
-    this.sessionLow = Math.min(this.sessionLow, this.bid);
-
-    // Order book mutations (add/remove/modify orders)
-    this.mutateOrderBook(events);
-
-    // Ensure book has enough levels
-    this.replenishBook();
-
-    // Send order book snapshot periodically embedded in the update
-    events.push({
-      type: 'book',
-      bids: this.getBookLevels('bids', 30),
-      asks: this.getBookLevels('asks', 30),
-      bid: this.bid,
-      ask: this.ask,
-      price: this.price,
-      spread: this.roundToTick(this.ask - this.bid),
-      totalVolume: this.totalVolume,
-      cvd: this.cvd,
-      sessionHigh: this.sessionHigh,
-      sessionLow: this.sessionLow,
-      symbol: this.symbol,
-      timestamp: Date.now()
-    });
-
-    return events;
-  }
-
-  mutateOrderBook(events) {
-    // Randomly add/modify/cancel orders in the book
-    const mutations = Math.floor(Math.random() * 8 + 2);
-    
-    for (let i = 0; i < mutations; i++) {
-      const side = Math.random() > 0.5 ? 'bids' : 'asks';
-      const basePrice = side === 'bids' ? this.bid : this.ask;
-      const offset = Math.floor(Math.random() * 30 + 1) * this.tickSize;
-      const price = side === 'bids' 
-        ? this.roundToTick(basePrice - offset)
-        : this.roundToTick(basePrice + offset);
-      const priceKey = price.toFixed(2);
-
-      const action = Math.random();
-      if (action < 0.4) {
-        // Add/increase order
-        const qty = Math.floor(Math.random() * 150 + 10);
-        this.orderBook[side][priceKey] = (this.orderBook[side][priceKey] || 0) + qty;
-      } else if (action < 0.7) {
-        // Reduce order
-        if (this.orderBook[side][priceKey]) {
-          const reduction = Math.floor(Math.random() * 50 + 1);
-          this.orderBook[side][priceKey] -= reduction;
-          if (this.orderBook[side][priceKey] <= 0) {
-            delete this.orderBook[side][priceKey];
-          }
-        }
-      } else if (action < 0.85) {
-        // Cancel order (spoofing simulation)
-        delete this.orderBook[side][priceKey];
-      } else {
-        // Large order appears (iceberg/wall)
-        const qty = Math.floor(Math.random() * 800 + 200);
-        this.orderBook[side][priceKey] = qty;
-      }
-    }
-  }
-
-  replenishBook() {
-    // Ensure there are always 30+ levels on each side
-    const bidPrices = Object.keys(this.orderBook.bids).map(Number).sort((a, b) => b - a);
-    const askPrices = Object.keys(this.orderBook.asks).map(Number).sort((a, b) => a - b);
-
-    while (bidPrices.length < 30) {
-      const lowestBid = bidPrices.length > 0 ? bidPrices[bidPrices.length - 1] : this.bid;
-      const newPrice = this.roundToTick(lowestBid - this.tickSize);
-      const qty = Math.floor(Math.random() * 200 + 30);
-      this.orderBook.bids[newPrice.toFixed(2)] = qty;
-      bidPrices.push(newPrice);
-    }
-
-    while (askPrices.length < 30) {
-      const highestAsk = askPrices.length > 0 ? askPrices[askPrices.length - 1] : this.ask;
-      const newPrice = this.roundToTick(highestAsk + this.tickSize);
-      const qty = Math.floor(Math.random() * 200 + 30);
-      this.orderBook.asks[newPrice.toFixed(2)] = qty;
-      askPrices.push(newPrice);
-    }
-  }
-
-  getBookLevels(side, depth) {
-    const entries = Object.entries(this.orderBook[side])
-      .map(([price, qty]) => [parseFloat(price), qty]);
-    
-    if (side === 'bids') {
-      entries.sort((a, b) => b[0] - a[0]);
-    } else {
-      entries.sort((a, b) => a[0] - b[0]);
-    }
-    
-    return entries.slice(0, depth);
-  }
+  });
 }
 
 // ============================================================
-// Start everything
+// Connect to Binance Trade Stream (Executed Trades)
 // ============================================================
-const simulator = new MarketSimulator();
+function connectTradeStream() {
+  const url = `wss://stream.binance.com:9443/ws/${BINANCE_SYMBOL}@aggTrade`;
+  
+  console.log(`[WS] Connecting to Binance trade stream: ${BINANCE_SYMBOL}...`);
+  
+  const ws = createWebSocketClient(url, {
+    onOpen: () => {
+      console.log(`[WS] ✓ Trade stream connected`);
+    },
+    onMessage: (data) => {
+      try {
+        const msg = JSON.parse(data);
+        const price = parseFloat(msg.p);
+        const qty = parseFloat(msg.q);
+        const isBuy = !msg.m; // m=true means maker is buyer (so trade is a sell)
+        const timestamp = msg.T || Date.now();
+        
+        tradeId++;
+        totalVolume += qty;
+        cvd += isBuy ? qty : -qty;
+        currentPrice = price;
+        
+        if (openPrice === 0) openPrice = price;
+        sessionHigh = Math.max(sessionHigh, price);
+        if (sessionLow === Infinity) sessionLow = price;
+        sessionLow = Math.min(sessionLow, price);
+        
+        pendingTrades.push({
+          type: 'trade',
+          id: tradeId,
+          price: price,
+          size: qty,
+          side: isBuy ? 'buy' : 'sell',
+          timestamp: timestamp
+        });
+      } catch (e) { /* ignore */ }
+    },
+    onClose: () => {
+      console.log('[WS] Trade stream disconnected, reconnecting...');
+      setTimeout(connectTradeStream, 3000);
+    },
+    onError: (err) => {
+      console.log('[WS] Trade stream error:', err.message || 'unknown');
+    }
+  });
+}
 
-// Broadcast market data at ~30fps (33ms intervals)
-setInterval(() => {
-  if (wsClients.size > 0) {
-    const events = simulator.tick();
-    broadcast({ events });
+// ============================================================
+// Simple WebSocket Client (Node.js built-in)
+// ============================================================
+function createWebSocketClient(url, handlers) {
+  const { URL } = require('url');
+  const parsedUrl = new URL(url);
+  const isSecure = parsedUrl.protocol === 'wss:';
+  const port = parsedUrl.port || (isSecure ? 443 : 80);
+  const wsKey = crypto.randomBytes(16).toString('base64');
+  
+  const options = {
+    hostname: parsedUrl.hostname,
+    port: port,
+    path: parsedUrl.pathname + parsedUrl.search,
+    headers: {
+      'Upgrade': 'websocket',
+      'Connection': 'Upgrade',
+      'Sec-WebSocket-Key': wsKey,
+      'Sec-WebSocket-Version': '13',
+      'Host': parsedUrl.host
+    },
+    rejectUnauthorized: false
+  };
+
+  const req = (isSecure ? https : http).request(options);
+  
+  req.on('upgrade', (res, socket, head) => {
+    let dataBuffer = Buffer.alloc(0);
+    
+    if (handlers.onOpen) handlers.onOpen();
+    
+    socket.on('data', (chunk) => {
+      dataBuffer = Buffer.concat([dataBuffer, chunk]);
+      
+      // Process all complete frames in buffer
+      while (dataBuffer.length >= 2) {
+        const frame = parseWSFrame(dataBuffer);
+        if (!frame) break;
+        
+        dataBuffer = dataBuffer.slice(frame.totalLength);
+        
+        if (frame.opcode === 0x1) { // text
+          if (handlers.onMessage) handlers.onMessage(frame.payload);
+        } else if (frame.opcode === 0x8) { // close
+          socket.end();
+          if (handlers.onClose) handlers.onClose();
+          return;
+        } else if (frame.opcode === 0x9) { // ping
+          // Send pong
+          const pong = Buffer.alloc(2);
+          pong[0] = 0x8A; // FIN + pong
+          pong[1] = 0;
+          socket.write(pong);
+        }
+      }
+    });
+    
+    socket.on('close', () => {
+      if (handlers.onClose) handlers.onClose();
+    });
+    
+    socket.on('error', (err) => {
+      if (handlers.onError) handlers.onError(err);
+    });
+    
+    // Send ping every 2 minutes to keep alive
+    const pingInterval = setInterval(() => {
+      try {
+        const ping = Buffer.alloc(2);
+        ping[0] = 0x89; // FIN + ping
+        ping[1] = 0;
+        socket.write(ping);
+      } catch (e) {
+        clearInterval(pingInterval);
+      }
+    }, 120000);
+    
+    socket.on('close', () => clearInterval(pingInterval));
+  });
+  
+  req.on('error', (err) => {
+    if (handlers.onError) handlers.onError(err);
+    setTimeout(() => {
+      if (handlers.onClose) handlers.onClose();
+    }, 1000);
+  });
+  
+  req.end();
+  return req;
+}
+
+function parseWSFrame(buffer) {
+  if (buffer.length < 2) return null;
+  
+  const firstByte = buffer[0];
+  const secondByte = buffer[1];
+  const opcode = firstByte & 0x0F;
+  const masked = (secondByte & 0x80) !== 0;
+  let payloadLength = secondByte & 0x7F;
+  let offset = 2;
+  
+  if (payloadLength === 126) {
+    if (buffer.length < 4) return null;
+    payloadLength = buffer.readUInt16BE(2);
+    offset = 4;
+  } else if (payloadLength === 127) {
+    if (buffer.length < 10) return null;
+    payloadLength = Number(buffer.readBigUInt64BE(2));
+    offset = 10;
   }
+  
+  if (masked) {
+    offset += 4; // skip mask
+  }
+  
+  const totalLength = offset + payloadLength;
+  if (buffer.length < totalLength) return null;
+  
+  let payload = buffer.slice(offset, totalLength);
+  
+  if (masked) {
+    const mask = buffer.slice(offset - 4, offset);
+    for (let i = 0; i < payload.length; i++) {
+      payload[i] ^= mask[i % 4];
+    }
+  }
+  
+  return {
+    opcode,
+    payload: payload.toString('utf8'),
+    totalLength
+  };
+}
+
+// ============================================================
+// Broadcast to frontend clients at 30fps
+// ============================================================
+setInterval(() => {
+  if (wsClients.size === 0) return;
+  if (!currentPrice) return;
+  
+  const events = [...pendingTrades];
+  pendingTrades = [];
+  
+  // Build book snapshot
+  const bidEntries = Object.entries(orderBook.bids)
+    .map(([p, q]) => [parseFloat(p), q])
+    .sort((a, b) => b[0] - a[0])
+    .slice(0, 30);
+  
+  const askEntries = Object.entries(orderBook.asks)
+    .map(([p, q]) => [parseFloat(p), q])
+    .sort((a, b) => a[0] - b[0])
+    .slice(0, 30);
+  
+  const bestBid = bidEntries.length ? bidEntries[0][0] : currentPrice - TICK_SIZE;
+  const bestAsk = askEntries.length ? askEntries[0][0] : currentPrice + TICK_SIZE;
+  
+  events.push({
+    type: 'book',
+    bids: bidEntries,
+    asks: askEntries,
+    bid: bestBid,
+    ask: bestAsk,
+    price: currentPrice,
+    spread: parseFloat((bestAsk - bestBid).toFixed(2)),
+    totalVolume: parseFloat(totalVolume.toFixed(4)),
+    cvd: parseFloat(cvd.toFixed(4)),
+    sessionHigh: sessionHigh,
+    sessionLow: sessionLow === Infinity ? currentPrice : sessionLow,
+    symbol: DISPLAY_SYMBOL,
+    timestamp: Date.now()
+  });
+  
+  broadcast({ events });
 }, 33);
 
+// ============================================================
+// Fallback: REST polling if WebSocket fails
+// ============================================================
+async function fetchJSON(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { rejectUnauthorized: false }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
+
+async function restFallback() {
+  if (binanceConnected) return;
+  
+  try {
+    // Fetch order book
+    const depth = await fetchJSON(`https://api.binance.com/api/v3/depth?symbol=PAXGUSDT&limit=20`);
+    if (depth.bids && depth.asks) {
+      orderBook.bids = {};
+      orderBook.asks = {};
+      depth.bids.forEach(([p, q]) => {
+        if (parseFloat(q) > 0) orderBook.bids[parseFloat(p).toFixed(2)] = parseFloat(q);
+      });
+      depth.asks.forEach(([p, q]) => {
+        if (parseFloat(q) > 0) orderBook.asks[parseFloat(p).toFixed(2)] = parseFloat(q);
+      });
+    }
+    
+    // Fetch recent trades
+    const trades = await fetchJSON(`https://api.binance.com/api/v3/trades?symbol=PAXGUSDT&limit=50`);
+    if (Array.isArray(trades)) {
+      trades.forEach(t => {
+        const price = parseFloat(t.price);
+        const qty = parseFloat(t.qty);
+        const isBuy = !t.isBuyerMaker;
+        
+        tradeId++;
+        totalVolume += qty;
+        cvd += isBuy ? qty : -qty;
+        currentPrice = price;
+        
+        if (openPrice === 0) openPrice = price;
+        sessionHigh = Math.max(sessionHigh, price);
+        if (sessionLow === Infinity) sessionLow = price;
+        sessionLow = Math.min(sessionLow, price);
+        
+        pendingTrades.push({
+          type: 'trade',
+          id: tradeId,
+          price,
+          size: qty,
+          side: isBuy ? 'buy' : 'sell',
+          timestamp: t.time || Date.now()
+        });
+      });
+    }
+    
+    console.log(`[REST] Fallback poll: price=${currentPrice.toFixed(2)}`);
+  } catch (e) {
+    console.log(`[REST] Error: ${e.message}`);
+  }
+}
+
+// Poll every 2s as fallback when WS is down
+setInterval(restFallback, 2000);
+
+// ============================================================
+// Start
+// ============================================================
 server.listen(PORT, () => {
-  console.log(`\n  🗺️  Bookmap Clone running at http://localhost:${PORT}\n`);
+  console.log(`\n  🗺️  BOOKMAP CLONE - LIVE XAUUSD`);
+  console.log(`  ─────────────────────────────────`);
+  console.log(`  URL: http://localhost:${PORT}`);
+  console.log(`  Data: Binance PAXG/USDT (Gold proxy)`);
+  console.log(`  Display: XAUUSD`);
+  console.log(`  ─────────────────────────────────`);
   console.log(`  Features:`);
-  console.log(`  - Real-time order book heatmap visualization`);
-  console.log(`  - Volume dots (trade bubbles)`);
-  console.log(`  - DOM (Depth of Market) ladder`);
-  console.log(`  - Volume Profile`);
-  console.log(`  - CVD (Cumulative Volume Delta)`);
-  console.log(`  - Interactive zoom/scroll/crosshair\n`);
+  console.log(`  • Real-time order book heatmap`);
+  console.log(`  • Volume dots (live trades)`);
+  console.log(`  • DOM ladder`);
+  console.log(`  • Volume Profile`);
+  console.log(`  • CVD (Cumulative Volume Delta)`);
+  console.log(`  ─────────────────────────────────\n`);
+  
+  // Connect to Binance live streams
+  connectDepthStream();
+  connectTradeStream();
+  
+  // Initial REST load
+  restFallback();
 });
