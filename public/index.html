@@ -76,6 +76,32 @@
     .toolbar-item.positive .value { color: var(--accent-green); }
     .toolbar-item.negative .value { color: var(--accent-red); }
 
+    .instrument-btn {
+      padding: 3px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      color: var(--text-secondary);
+      font-size: 11px;
+      cursor: pointer;
+      border-radius: 3px;
+      font-family: inherit;
+    }
+    .instrument-btn:hover { background: var(--border-color); color: var(--text-primary); }
+    .instrument-btn.active { background: var(--accent-blue); color: #000; border-color: var(--accent-blue); font-weight: bold; }
+
+    .order-btn {
+      padding: 3px 10px;
+      border: none;
+      font-size: 11px;
+      cursor: pointer;
+      border-radius: 3px;
+      font-family: inherit;
+      font-weight: bold;
+    }
+    .order-btn.buy { background: var(--accent-green); color: #000; }
+    .order-btn.sell { background: var(--accent-red); color: #fff; }
+    .order-btn:hover { opacity: 0.85; }
+
     .status-dot {
       width: 8px;
       height: 8px;
@@ -336,9 +362,13 @@
   <div id="toolbar">
     <span class="toolbar-brand">BOOKMAP</span>
     <div class="toolbar-sep"></div>
-    <div class="toolbar-item">
-      <span>Symbol:</span>
-      <span class="value" id="tb-symbol">ES</span>
+    <div id="instrument-buttons" style="display:flex;gap:3px;">
+      <button class="instrument-btn active" data-symbol="XAUUSD">XAU</button>
+      <button class="instrument-btn" data-symbol="BTCUSD">BTC</button>
+      <button class="instrument-btn" data-symbol="ETHUSD">ETH</button>
+      <button class="instrument-btn" data-symbol="SOLUSD">SOL</button>
+      <button class="instrument-btn" data-symbol="BNBUSD">BNB</button>
+      <button class="instrument-btn" data-symbol="XRPUSD">XRP</button>
     </div>
     <div class="toolbar-sep"></div>
     <div class="toolbar-item">
@@ -359,7 +389,7 @@
       <span class="value" style="color:var(--ask-text)" id="tb-ask">--</span>
     </div>
     <div class="toolbar-item">
-      <span>Spread:</span>
+      <span>Sprd:</span>
       <span class="value" id="tb-spread">--</span>
     </div>
     <div class="toolbar-sep"></div>
@@ -375,6 +405,9 @@
       <span>Lo:</span>
       <span class="value" style="color:var(--accent-red)" id="tb-low">--</span>
     </div>
+    <div class="toolbar-sep"></div>
+    <button class="order-btn buy" id="btn-buy">BUY</button>
+    <button class="order-btn sell" id="btn-sell">SELL</button>
     <div class="toolbar-sep"></div>
     <div class="toolbar-item">
       <div class="status-dot"></div>

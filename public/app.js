@@ -137,6 +137,33 @@ function connectWebSocket() {
 
 // ===== MARKET DATA PROCESSING =====
 function processMarketData(data) {
+  // Handle init message (instruments list)
+  if (data.type === 'init') {
+    state.symbol = data.activeSymbol;
+    state.tickSize = data.tickSize || 0.01;
+    // Highlight active button
+    document.querySelectorAll('.instrument-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.symbol === data.activeSymbol);
+    });
+    return;
+  }
+  
+  // Handle instrument change confirmation
+  if (data.type === 'instrument_changed') {
+    state.symbol = data.symbol;
+    state.tickSize = data.tickSize || 0.01;
+    state.openPrice = 0;
+    state.heatmapColumns = [];
+    state.trades = [];
+    state.volumeProfile = {};
+    state.cvdHistory = [];
+    state.priceOffset = 0;
+    document.querySelectorAll('.instrument-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.symbol === data.symbol);
+    });
+    return;
+  }
+  
   if (!data.events) return;
   
   let bookUpdate = null;
@@ -227,7 +254,6 @@ function processMarketData(data) {
 }
 
 function updateToolbar() {
-  document.getElementById('tb-symbol').textContent = state.symbol;
   document.getElementById('tb-last').textContent = state.currentPrice.toFixed(2);
   document.getElementById('tb-bid').textContent = state.bid.toFixed(2);
   document.getElementById('tb-ask').textContent = state.ask.toFixed(2);
@@ -236,7 +262,7 @@ function updateToolbar() {
   document.getElementById('tb-high').textContent = state.sessionHigh.toFixed(2);
   document.getElementById('tb-low').textContent = state.sessionLow.toFixed(2);
   
-  const change = state.currentPrice - state.openPrice;
+  const change = state.currentPrice - (state.openPrice || state.currentPrice);
   const changeEl = document.getElementById('tb-change');
   const container = document.getElementById('tb-change-container');
   changeEl.textContent = (change >= 0 ? '+' : '') + change.toFixed(2);
@@ -816,6 +842,29 @@ function renderDOM() {
 function setupInteraction() {
   const container = document.getElementById('heatmap-container');
   
+  // Instrument switching
+  document.querySelectorAll('.instrument-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const symbol = btn.dataset.symbol;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'switch_instrument', symbol }));
+      }
+      document.querySelectorAll('.instrument-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    });
+  });
+  
+  // Order entry (simulated)
+  document.getElementById('btn-buy').addEventListener('click', () => {
+    if (!state.currentPrice) return;
+    showOrderFlash('BUY', state.ask);
+  });
+  
+  document.getElementById('btn-sell').addEventListener('click', () => {
+    if (!state.currentPrice) return;
+    showOrderFlash('SELL', state.bid);
+  });
+  
   // Mouse move (crosshair)
   container.addEventListener('mousemove', (e) => {
     const rect = heatmapCanvas.getBoundingClientRect();
@@ -884,6 +933,46 @@ function setupInteraction() {
         break;
     }
   });
+}
+
+// ===== ORDER FLASH (simulated order feedback) =====
+function showOrderFlash(side, price) {
+  const flash = document.createElement('div');
+  flash.style.cssText = `
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 16px 32px;
+    border-radius: 8px;
+    font-size: 18px;
+    font-weight: bold;
+    font-family: monospace;
+    z-index: 9999;
+    pointer-events: none;
+    animation: orderFlash 1.5s ease-out forwards;
+    ${side === 'BUY' 
+      ? 'background: rgba(76,175,80,0.9); color: #fff; border: 2px solid #4caf50;' 
+      : 'background: rgba(244,67,54,0.9); color: #fff; border: 2px solid #f44336;'}
+  `;
+  flash.textContent = `${side} @ ${price.toFixed(2)}`;
+  document.body.appendChild(flash);
+  
+  // Add CSS animation if not exists
+  if (!document.getElementById('order-flash-style')) {
+    const style = document.createElement('style');
+    style.id = 'order-flash-style';
+    style.textContent = `
+      @keyframes orderFlash {
+        0% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        70% { opacity: 1; transform: translate(-50%, -50%) scale(1.05); }
+        100% { opacity: 0; transform: translate(-50%, -70%) scale(0.9); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  
+  setTimeout(() => flash.remove(), 1500);
 }
 
 // ===== START =====

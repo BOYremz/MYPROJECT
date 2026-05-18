@@ -70,6 +70,16 @@ server.on('upgrade', (req, socket, head) => {
 
   const client = { socket, alive: true };
   wsClients.add(client);
+  
+  // Send init data to new client
+  try {
+    sendWSFrame(socket, JSON.stringify({
+      type: 'init',
+      instruments: INSTRUMENTS,
+      activeSymbol: activeSymbol,
+      tickSize: INSTRUMENTS[activeSymbol].tickSize
+    }));
+  } catch (e) { /* ignore */ }
 
   socket.on('data', (buffer) => {
     const message = decodeWSFrame(buffer);
@@ -82,6 +92,15 @@ server.on('upgrade', (req, socket, head) => {
     if (message.opcode === 0x9) {
       sendWSFrame(socket, '', 0xA);
       return;
+    }
+    // Handle text messages from client
+    if (message.opcode === 0x1) {
+      try {
+        const msg = JSON.parse(message.payload);
+        if (msg.type === 'switch_instrument' && msg.symbol) {
+          switchInstrument(msg.symbol);
+        }
+      } catch (e) { /* ignore */ }
     }
   });
 
@@ -164,13 +183,20 @@ function broadcast(data) {
 }
 
 // ============================================================
-// Binance WebSocket Client (connects to live market data)
-// Using PAXG/USDT as gold proxy for XAUUSD
+// Multi-Instrument Support
 // ============================================================
 
-const BINANCE_SYMBOL = 'paxgusdt';
-const DISPLAY_SYMBOL = 'XAUUSD';
-const TICK_SIZE = 0.01; // Gold ticks in cents
+const INSTRUMENTS = {
+  'XAUUSD': { binance: 'paxgusdt', name: 'Gold / XAUUSD', tickSize: 0.01 },
+  'BTCUSD': { binance: 'btcusdt', name: 'Bitcoin / USD', tickSize: 0.01 },
+  'ETHUSD': { binance: 'ethusdt', name: 'Ethereum / USD', tickSize: 0.01 },
+  'SOLUSD': { binance: 'solusdt', name: 'Solana / USD', tickSize: 0.001 },
+  'BNBUSD': { binance: 'bnbusdt', name: 'BNB / USD (NAS100 proxy)', tickSize: 0.01 },
+  'XRPUSD': { binance: 'xrpusdt', name: 'XRP / USD', tickSize: 0.0001 },
+};
+
+let activeSymbol = 'XAUUSD';
+let activeBinanceSymbol = INSTRUMENTS[activeSymbol].binance;
 
 // Market state
 let orderBook = { bids: {}, asks: {} };
@@ -183,6 +209,10 @@ let openPrice = 0;
 let tradeId = 0;
 let binanceConnected = false;
 
+// Active stream connections (so we can close & reopen on instrument change)
+let activeDepthSocket = null;
+let activeTradeSocket = null;
+
 // Buffers for client updates
 let pendingTrades = [];
 let lastBookBroadcast = 0;
@@ -191,13 +221,14 @@ let lastBookBroadcast = 0;
 // Connect to Binance Depth Stream (Order Book)
 // ============================================================
 function connectDepthStream() {
-  const url = `wss://stream.binance.com:9443/ws/${BINANCE_SYMBOL}@depth20@100ms`;
+  const symbol = activeBinanceSymbol;
+  const url = `wss://stream.binance.com:9443/ws/${symbol}@depth20@100ms`;
   
-  console.log(`[WS] Connecting to Binance depth stream: ${BINANCE_SYMBOL}...`);
+  console.log(`[WS] Connecting to Binance depth stream: ${symbol}...`);
   
-  const ws = createWebSocketClient(url, {
+  activeDepthSocket = createWebSocketClient(url, {
     onOpen: () => {
-      console.log(`[WS] ✓ Depth stream connected`);
+      console.log(`[WS] Depth stream connected (${symbol})`);
       binanceConnected = true;
     },
     onMessage: (data) => {
@@ -250,20 +281,21 @@ function connectDepthStream() {
 // Connect to Binance Trade Stream (Executed Trades)
 // ============================================================
 function connectTradeStream() {
-  const url = `wss://stream.binance.com:9443/ws/${BINANCE_SYMBOL}@aggTrade`;
+  const symbol = activeBinanceSymbol;
+  const url = `wss://stream.binance.com:9443/ws/${symbol}@aggTrade`;
   
-  console.log(`[WS] Connecting to Binance trade stream: ${BINANCE_SYMBOL}...`);
+  console.log(`[WS] Connecting to Binance trade stream: ${symbol}...`);
   
-  const ws = createWebSocketClient(url, {
+  activeTradeSocket = createWebSocketClient(url, {
     onOpen: () => {
-      console.log(`[WS] ✓ Trade stream connected`);
+      console.log(`[WS] Trade stream connected (${symbol})`);
     },
     onMessage: (data) => {
       try {
         const msg = JSON.parse(data);
         const price = parseFloat(msg.p);
         const qty = parseFloat(msg.q);
-        const isBuy = !msg.m; // m=true means maker is buyer (so trade is a sell)
+        const isBuy = !msg.m;
         const timestamp = msg.T || Date.now();
         
         tradeId++;
@@ -293,6 +325,44 @@ function connectTradeStream() {
     onError: (err) => {
       console.log('[WS] Trade stream error:', err.message || 'unknown');
     }
+  });
+}
+
+// ============================================================
+// Switch Instrument
+// ============================================================
+function switchInstrument(symbol) {
+  if (!INSTRUMENTS[symbol]) return;
+  if (symbol === activeSymbol) return;
+  
+  console.log(`[SWITCH] Changing to ${symbol} (${INSTRUMENTS[symbol].binance})`);
+  
+  activeSymbol = symbol;
+  activeBinanceSymbol = INSTRUMENTS[symbol].binance;
+  
+  // Reset state
+  orderBook = { bids: {}, asks: {} };
+  currentPrice = 0;
+  totalVolume = 0;
+  cvd = 0;
+  sessionHigh = 0;
+  sessionLow = Infinity;
+  openPrice = 0;
+  pendingTrades = [];
+  binanceConnected = false;
+  
+  // Reconnect streams (old ones will auto-close and not reconnect
+  // because activeBinanceSymbol changed)
+  connectDepthStream();
+  connectTradeStream();
+  restFallback();
+  
+  // Notify clients
+  broadcast({
+    type: 'instrument_changed',
+    symbol: activeSymbol,
+    name: INSTRUMENTS[symbol].name,
+    tickSize: INSTRUMENTS[symbol].tickSize
   });
 }
 
@@ -466,7 +536,7 @@ setInterval(() => {
     cvd: parseFloat(cvd.toFixed(4)),
     sessionHigh: sessionHigh,
     sessionLow: sessionLow === Infinity ? currentPrice : sessionLow,
-    symbol: DISPLAY_SYMBOL,
+    symbol: activeSymbol,
     timestamp: Date.now()
   });
   
@@ -492,9 +562,11 @@ async function fetchJSON(url) {
 async function restFallback() {
   if (binanceConnected) return;
   
+  const symbol = activeBinanceSymbol.toUpperCase();
+  
   try {
     // Fetch order book
-    const depth = await fetchJSON(`https://api.binance.com/api/v3/depth?symbol=PAXGUSDT&limit=20`);
+    const depth = await fetchJSON(`https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=20`);
     if (depth.bids && depth.asks) {
       orderBook.bids = {};
       orderBook.asks = {};
@@ -507,7 +579,7 @@ async function restFallback() {
     }
     
     // Fetch recent trades
-    const trades = await fetchJSON(`https://api.binance.com/api/v3/trades?symbol=PAXGUSDT&limit=50`);
+    const trades = await fetchJSON(`https://api.binance.com/api/v3/trades?symbol=${symbol}&limit=50`);
     if (Array.isArray(trades)) {
       trades.forEach(t => {
         const price = parseFloat(t.price);
@@ -535,7 +607,7 @@ async function restFallback() {
       });
     }
     
-    console.log(`[REST] Fallback poll: price=${currentPrice.toFixed(2)}`);
+    console.log(`[REST] Fallback poll (${activeSymbol}): price=${currentPrice.toFixed(2)}`);
   } catch (e) {
     console.log(`[REST] Error: ${e.message}`);
   }
@@ -548,18 +620,23 @@ setInterval(restFallback, 2000);
 // Start
 // ============================================================
 server.listen(PORT, () => {
-  console.log(`\n  🗺️  BOOKMAP CLONE - LIVE XAUUSD`);
+  console.log(`\n  BOOKMAP CLONE - LIVE MARKET DATA`);
   console.log(`  ─────────────────────────────────`);
   console.log(`  URL: http://localhost:${PORT}`);
-  console.log(`  Data: Binance PAXG/USDT (Gold proxy)`);
-  console.log(`  Display: XAUUSD`);
+  console.log(`  Default: ${activeSymbol} (${INSTRUMENTS[activeSymbol].name})`);
+  console.log(`  ─────────────────────────────────`);
+  console.log(`  Available instruments:`);
+  Object.entries(INSTRUMENTS).forEach(([sym, info]) => {
+    console.log(`    ${sym.padEnd(8)} → ${info.name} (${info.binance.toUpperCase()})`);
+  });
   console.log(`  ─────────────────────────────────`);
   console.log(`  Features:`);
   console.log(`  • Real-time order book heatmap`);
   console.log(`  • Volume dots (live trades)`);
   console.log(`  • DOM ladder`);
-  console.log(`  • Volume Profile`);
-  console.log(`  • CVD (Cumulative Volume Delta)`);
+  console.log(`  • Volume Profile + CVD`);
+  console.log(`  • Multi-instrument switching`);
+  console.log(`  • Simulated order entry`);
   console.log(`  ─────────────────────────────────\n`);
   
   // Connect to Binance live streams
@@ -568,4 +645,7 @@ server.listen(PORT, () => {
   
   // Initial REST load
   restFallback();
+  
+  // Send instruments list to new clients
+  const originalBroadcast = broadcast;
 });
