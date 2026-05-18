@@ -1,17 +1,20 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- *  FREE BOOKMAP-STYLE HEATMAP SERVER
+ *  FREE BOOKMAP HEATMAP + CANDLESTICK CHART SERVER
  *  Live market data via Binance WebSocket (FREE - no API key needed)
  * 
- *  Supported Markets:
- *  - GOLD/XAUUSD  → PAXGUSDT (tokenized gold, tracks XAU perfectly)
- *  - NASDAQ/US100 → Uses crypto correlates or direct index tokens
- *  - FOREX pairs  → EURUSDT, GBPUSDT, JPYUSDT etc.
- *  - CRYPTO       → BTCUSDT, ETHUSDT, etc.
+ *  Features:
+ *  - Real-time candlestick chart (1m, 5m, 15m, 30m, 1h, 4h, 1D)
+ *  - Volume bars with buy/sell coloring
+ *  - Order book heatmap overlay
+ *  - Candle close countdown timer
+ *  - Order flow detection (iceberg, pulling, stacking, etc.)
  * 
- *  Detects: Resting Liquidity, Market Orders, Order Pulling,
- *           Order Stacking, Iceberg Absorption, Aggressive 
- *           Buying/Selling, DOM Evolution Over Time
+ *  Supported Markets:
+ *  - GOLD/XAUUSD  → PAXGUSDT (tokenized gold)
+ *  - NASDAQ/US100 → BNB proxy
+ *  - FOREX        → EURUSDT, GBPUSDT
+ *  - CRYPTO       → BTCUSDT, ETHUSDT, SOLUSDT
  * ═══════════════════════════════════════════════════════════════════
  */
 
@@ -27,23 +30,38 @@ const wss = new WebSocket.Server({ server });
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ═══════════════════════════════════════════════════════════════════
-// AVAILABLE INSTRUMENTS (maps friendly names to Binance symbols)
+// INSTRUMENTS
 // ═══════════════════════════════════════════════════════════════════
 const INSTRUMENTS = {
-  'XAUUSD': { symbol: 'paxgusdt', name: 'Gold / XAUUSD', tickSize: 0.1, aggSize: 0.001 },
-  'BTCUSD': { symbol: 'btcusdt', name: 'Bitcoin / USD', tickSize: 1, aggSize: 0.01 },
-  'ETHUSD': { symbol: 'ethusdt', name: 'Ethereum / USD', tickSize: 0.1, aggSize: 0.1 },
-  'EURUSD': { symbol: 'eurusdt', name: 'EUR / USD', tickSize: 0.0001, aggSize: 10 },
-  'GBPUSD': { symbol: 'gbpusdt', name: 'GBP / USD', tickSize: 0.0001, aggSize: 10 },
-  'NAS100': { symbol: 'bnbusdt', name: 'Nasdaq Proxy (BNB)', tickSize: 0.01, aggSize: 0.1 },
-  'SOLUSD': { symbol: 'solusdt', name: 'Solana / USD', tickSize: 0.01, aggSize: 1 },
+  'XAUUSD': { symbol: 'paxgusdt', name: 'Gold / XAUUSD', tickSize: 0.1, decimals: 2 },
+  'BTCUSD': { symbol: 'btcusdt', name: 'Bitcoin / USD', tickSize: 1, decimals: 2 },
+  'ETHUSD': { symbol: 'ethusdt', name: 'Ethereum / USD', tickSize: 0.1, decimals: 2 },
+  'EURUSD': { symbol: 'eurusdt', name: 'EUR / USD', tickSize: 0.0001, decimals: 5 },
+  'GBPUSD': { symbol: 'gbpusdt', name: 'GBP / USD', tickSize: 0.0001, decimals: 5 },
+  'NAS100': { symbol: 'bnbusdt', name: 'Nasdaq Proxy (BNB)', tickSize: 0.01, decimals: 2 },
+  'SOLUSD': { symbol: 'solusdt', name: 'Solana / USD', tickSize: 0.01, decimals: 2 },
 };
 
 // ═══════════════════════════════════════════════════════════════════
-// CONFIGURATION
+// TIMEFRAMES (in milliseconds)
+// ═══════════════════════════════════════════════════════════════════
+const TIMEFRAMES = {
+  '1m': 60000,
+  '5m': 300000,
+  '15m': 900000,
+  '30m': 1800000,
+  '1h': 3600000,
+  '4h': 14400000,
+  '1D': 86400000,
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// CONFIG & STATE
 // ═══════════════════════════════════════════════════════════════════
 const CONFIG = {
   currentInstrument: 'XAUUSD',
+  currentTimeframe: '1m',
+  maxCandles: 500,
   depthLevels: 20,
   snapshotInterval: 300,
   historyLength: 400,
@@ -53,9 +71,7 @@ const CONFIG = {
   aggressiveMultiplier: 3,
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// MARKET DATA STATE
-// ═══════════════════════════════════════════════════════════════════
+// Market state
 let orderBook = { bids: {}, asks: {} };
 let previousOrderBook = { bids: {}, asks: {} };
 let tradeHistory = [];
@@ -66,12 +82,62 @@ let icebergTracker = {};
 let avgTradeSize = 0;
 let tradeCount = 0;
 
-// Binance connections
+// OHLC Candle state - stores candles for ALL timeframes
+let candles = {};
+Object.keys(TIMEFRAMES).forEach(tf => { candles[tf] = []; });
+
 let depthWs = null;
 let tradeWs = null;
 
 // ═══════════════════════════════════════════════════════════════════
-// BINANCE WEBSOCKET CONNECTIONS
+// CANDLE BUILDING
+// ═══════════════════════════════════════════════════════════════════
+function getCandelOpenTime(timestamp, timeframeMs) {
+  return Math.floor(timestamp / timeframeMs) * timeframeMs;
+}
+
+function updateCandles(price, qty, timestamp, isBuy) {
+  Object.entries(TIMEFRAMES).forEach(([tf, ms]) => {
+    const openTime = getCandelOpenTime(timestamp, ms);
+    const tfCandles = candles[tf];
+    
+    let currentCandle = tfCandles.length > 0 ? tfCandles[tfCandles.length - 1] : null;
+    
+    if (!currentCandle || currentCandle.openTime !== openTime) {
+      // Start new candle
+      const newCandle = {
+        openTime: openTime,
+        closeTime: openTime + ms,
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        volume: qty,
+        buyVolume: isBuy ? qty : 0,
+        sellVolume: isBuy ? 0 : qty,
+        trades: 1,
+      };
+      tfCandles.push(newCandle);
+      
+      // Keep bounded
+      if (tfCandles.length > CONFIG.maxCandles) {
+        candles[tf] = tfCandles.slice(-CONFIG.maxCandles);
+      }
+    } else {
+      // Update existing candle
+      currentCandle.high = Math.max(currentCandle.high, price);
+      currentCandle.low = Math.min(currentCandle.low, price);
+      currentCandle.close = price;
+      currentCandle.volume += qty;
+      if (isBuy) currentCandle.buyVolume += qty;
+      else currentCandle.sellVolume += qty;
+      currentCandle.trades++;
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// BINANCE CONNECTIONS
 // ═══════════════════════════════════════════════════════════════════
 function getSymbol() {
   return INSTRUMENTS[CONFIG.currentInstrument].symbol;
@@ -168,176 +234,97 @@ function processDepthUpdate(depth) {
     currentPrice = (bestBid + bestAsk) / 2;
   }
 
-  // Run detection algorithms
   detectOrderPulling();
   detectOrderStacking();
   detectIcebergAbsorption();
-  detectRestingLiquidity();
 }
 
 function processTrade(trade) {
+  const price = parseFloat(trade.p);
+  const qty = parseFloat(trade.q);
+  const timestamp = trade.T || Date.now();
+  const isBuy = !trade.m;
+  
   const tradeData = {
-    price: parseFloat(trade.p),
-    qty: parseFloat(trade.q),
-    time: trade.T || Date.now(),
-    isBuy: !trade.m, // m=true means buyer is maker, so taker SOLD
-    value: parseFloat(trade.p) * parseFloat(trade.q),
+    price, qty, time: timestamp, isBuy,
+    value: price * qty,
   };
   
-  currentPrice = tradeData.price;
+  currentPrice = price;
   tradeHistory.push(tradeData);
+  
+  // Update candles
+  updateCandles(price, qty, timestamp, isBuy);
   
   // Update average trade size
   tradeCount++;
-  avgTradeSize = avgTradeSize + (tradeData.qty - avgTradeSize) / Math.min(tradeCount, 200);
+  avgTradeSize = avgTradeSize + (qty - avgTradeSize) / Math.min(tradeCount, 200);
   
   if (tradeHistory.length > 2000) {
     tradeHistory = tradeHistory.slice(-2000);
   }
 
-  // Detect aggressive buying/selling
+  // Detect aggressive trades
   const threshold = avgTradeSize * CONFIG.aggressiveMultiplier;
-  if (tradeData.qty >= threshold && threshold > 0) {
+  if (qty >= threshold && threshold > 0) {
     addEvent({
-      type: tradeData.isBuy ? 'AGGRESSIVE_BUY' : 'AGGRESSIVE_SELL',
-      price: tradeData.price,
-      size: tradeData.qty,
-      value: tradeData.value,
+      type: isBuy ? 'AGGRESSIVE_BUY' : 'AGGRESSIVE_SELL',
+      price, size: qty,
       time: Date.now(),
-      description: `${tradeData.isBuy ? '🟢 AGGRESSIVE BUY' : '🔴 AGGRESSIVE SELL'}: ${tradeData.qty.toFixed(4)} @ ${tradeData.price}`,
     });
   }
-
-  // All trades are market orders
-  addEvent({
-    type: 'MARKET_ORDER',
-    price: tradeData.price,
-    size: tradeData.qty,
-    side: tradeData.isBuy ? 'BUY' : 'SELL',
-    time: Date.now(),
-  });
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // DETECTION ALGORITHMS
 // ═══════════════════════════════════════════════════════════════════
-
-function detectRestingLiquidity() {
-  // Large resting orders that haven't moved for multiple snapshots
-  const instrument = INSTRUMENTS[CONFIG.currentInstrument];
-  const threshold = avgTradeSize * 5;
-  
-  for (const [price, qty] of Object.entries(orderBook.bids)) {
-    if (qty >= threshold) {
-      addEvent({
-        type: 'RESTING_LIQUIDITY',
-        side: 'BID',
-        price: parseFloat(price),
-        size: qty,
-        time: Date.now(),
-        description: `📍 RESTING BID: ${qty.toFixed(4)} @ ${price}`,
-      });
-    }
-  }
-  
-  for (const [price, qty] of Object.entries(orderBook.asks)) {
-    if (qty >= threshold) {
-      addEvent({
-        type: 'RESTING_LIQUIDITY',
-        side: 'ASK',
-        price: parseFloat(price),
-        size: qty,
-        time: Date.now(),
-        description: `📍 RESTING ASK: ${qty.toFixed(4)} @ ${price}`,
-      });
-    }
-  }
-}
-
 function detectOrderPulling() {
-  // Orders disappearing (spoofing detection)
   const threshold = avgTradeSize * 2;
   
-  for (const price of Object.keys(previousOrderBook.bids)) {
-    const p = parseFloat(price);
-    const oldQty = previousOrderBook.bids[p] || 0;
-    const newQty = orderBook.bids[p] || 0;
-    
-    if (oldQty >= threshold && newQty < oldQty * CONFIG.pullThreshold) {
-      addEvent({
-        type: 'ORDER_PULL',
-        side: 'BID',
-        price: p,
-        oldSize: oldQty,
-        newSize: newQty,
-        time: Date.now(),
-        description: `⚠️ BID PULLED: ${oldQty.toFixed(4)} → ${newQty.toFixed(4)} @ ${p}`,
-      });
+  const check = (prev, curr, side) => {
+    for (const price of Object.keys(prev)) {
+      const p = parseFloat(price);
+      const oldQty = prev[p] || 0;
+      const newQty = curr[p] || 0;
+      
+      if (oldQty >= threshold && newQty < oldQty * CONFIG.pullThreshold) {
+        addEvent({
+          type: 'ORDER_PULL', side, price: p,
+          oldSize: oldQty, newSize: newQty,
+          time: Date.now(),
+        });
+      }
     }
-  }
+  };
   
-  for (const price of Object.keys(previousOrderBook.asks)) {
-    const p = parseFloat(price);
-    const oldQty = previousOrderBook.asks[p] || 0;
-    const newQty = orderBook.asks[p] || 0;
-    
-    if (oldQty >= threshold && newQty < oldQty * CONFIG.pullThreshold) {
-      addEvent({
-        type: 'ORDER_PULL',
-        side: 'ASK',
-        price: p,
-        oldSize: oldQty,
-        newSize: newQty,
-        time: Date.now(),
-        description: `⚠️ ASK PULLED: ${oldQty.toFixed(4)} → ${newQty.toFixed(4)} @ ${p}`,
-      });
-    }
-  }
+  check(previousOrderBook.bids, orderBook.bids, 'BID');
+  check(previousOrderBook.asks, orderBook.asks, 'ASK');
 }
 
 function detectOrderStacking() {
-  // Sudden buildup of orders at a level
   const threshold = avgTradeSize * 2;
   
-  for (const price of Object.keys(orderBook.bids)) {
-    const p = parseFloat(price);
-    const oldQty = previousOrderBook.bids[p] || 0;
-    const newQty = orderBook.bids[p] || 0;
-    
-    if (newQty >= threshold && oldQty > 0 && newQty > oldQty * CONFIG.stackThreshold) {
-      addEvent({
-        type: 'ORDER_STACK',
-        side: 'BID',
-        price: p,
-        oldSize: oldQty,
-        newSize: newQty,
-        time: Date.now(),
-        description: `🧱 BID STACKED: ${oldQty.toFixed(4)} → ${newQty.toFixed(4)} @ ${p}`,
-      });
+  const check = (prev, curr, side) => {
+    for (const price of Object.keys(curr)) {
+      const p = parseFloat(price);
+      const oldQty = prev[p] || 0;
+      const newQty = curr[p] || 0;
+      
+      if (newQty >= threshold && oldQty > 0 && newQty > oldQty * CONFIG.stackThreshold) {
+        addEvent({
+          type: 'ORDER_STACK', side, price: p,
+          oldSize: oldQty, newSize: newQty,
+          time: Date.now(),
+        });
+      }
     }
-  }
+  };
   
-  for (const price of Object.keys(orderBook.asks)) {
-    const p = parseFloat(price);
-    const oldQty = previousOrderBook.asks[p] || 0;
-    const newQty = orderBook.asks[p] || 0;
-    
-    if (newQty >= threshold && oldQty > 0 && newQty > oldQty * CONFIG.stackThreshold) {
-      addEvent({
-        type: 'ORDER_STACK',
-        side: 'ASK',
-        price: p,
-        oldSize: oldQty,
-        newSize: newQty,
-        time: Date.now(),
-        description: `🧱 ASK STACKED: ${oldQty.toFixed(4)} → ${newQty.toFixed(4)} @ ${p}`,
-      });
-    }
-  }
+  check(previousOrderBook.bids, orderBook.bids, 'BID');
+  check(previousOrderBook.asks, orderBook.asks, 'ASK');
 }
 
 function detectIcebergAbsorption() {
-  // Level keeps refilling after being consumed = hidden iceberg order
   const threshold = avgTradeSize * 1.5;
   
   const checkSide = (prev, curr, side) => {
@@ -346,35 +333,25 @@ function detectIcebergAbsorption() {
       const oldQty = prev[p] || 0;
       const newQty = curr[p] || 0;
       
-      if (oldQty >= threshold) {
-        // Check if level was partially consumed but refilled
-        const key = `${side}_${p}`;
+      if (oldQty >= threshold && newQty >= oldQty * 0.7 && newQty <= oldQty * 1.3) {
+        const recentTrades = tradeHistory.filter(t => 
+          Math.abs(t.price - p) < INSTRUMENTS[CONFIG.currentInstrument].tickSize * 2 &&
+          Date.now() - t.time < 5000
+        );
         
-        if (newQty >= oldQty * 0.7 && newQty <= oldQty * 1.3) {
-          // Level maintained despite trades happening at this price
-          const recentTrades = tradeHistory.filter(t => 
-            Math.abs(t.price - p) < INSTRUMENTS[CONFIG.currentInstrument].tickSize * 2 &&
-            Date.now() - t.time < 5000
-          );
+        if (recentTrades.length > 0) {
+          const key = `${side}_${p}`;
+          icebergTracker[key] = (icebergTracker[key] || 0) + 1;
           
-          if (recentTrades.length > 0) {
-            icebergTracker[key] = (icebergTracker[key] || 0) + 1;
-            
-            if (icebergTracker[key] >= CONFIG.icebergThreshold) {
-              addEvent({
-                type: 'ICEBERG',
-                side: side.toUpperCase(),
-                price: p,
-                size: newQty,
-                refillCount: icebergTracker[key],
-                time: Date.now(),
-                description: `🧊 ICEBERG ${side.toUpperCase()}: Level ${p} refilled ${icebergTracker[key]}x (size: ${newQty.toFixed(4)})`,
-              });
-              icebergTracker[key] = 0;
-            }
+          if (icebergTracker[key] >= CONFIG.icebergThreshold) {
+            addEvent({
+              type: 'ICEBERG', side: side.toUpperCase(),
+              price: p, size: newQty,
+              refillCount: icebergTracker[key],
+              time: Date.now(),
+            });
+            icebergTracker[key] = 0;
           }
-        } else {
-          icebergTracker[`${side}_${p}`] = 0;
         }
       }
     }
@@ -383,45 +360,37 @@ function detectIcebergAbsorption() {
   checkSide(previousOrderBook.bids, orderBook.bids, 'bid');
   checkSide(previousOrderBook.asks, orderBook.asks, 'ask');
   
-  // Cleanup old trackers
-  const keys = Object.keys(icebergTracker);
-  if (keys.length > 200) {
-    const toRemove = keys.slice(0, keys.length - 100);
-    toRemove.forEach(k => delete icebergTracker[k]);
+  if (Object.keys(icebergTracker).length > 200) {
+    const keys = Object.keys(icebergTracker);
+    keys.slice(0, keys.length - 100).forEach(k => delete icebergTracker[k]);
   }
 }
 
 function addEvent(event) {
-  // Deduplicate (don't add same type+price within 1 second)
-  if (event.type !== 'MARKET_ORDER') {
-    const isDuplicate = detectedEvents.some(e => 
-      e.type === event.type && 
-      e.price === event.price && 
-      Date.now() - e.time < 1000
-    );
-    if (isDuplicate) return;
-  }
+  const isDuplicate = detectedEvents.some(e => 
+    e.type === event.type && e.price === event.price && Date.now() - e.time < 1000
+  );
+  if (isDuplicate) return;
   
   detectedEvents.push(event);
-  if (detectedEvents.length > 1000) {
-    detectedEvents = detectedEvents.slice(-1000);
+  if (detectedEvents.length > 500) {
+    detectedEvents = detectedEvents.slice(-500);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// DOM HISTORY SNAPSHOTS (for heatmap time-series)
+// DOM SNAPSHOTS
 // ═══════════════════════════════════════════════════════════════════
 function takeDOMSnapshot() {
   if (Object.keys(orderBook.bids).length === 0) return;
   
-  const snapshot = {
+  domHistory.push({
     time: Date.now(),
     price: currentPrice,
     bids: { ...orderBook.bids },
     asks: { ...orderBook.asks },
-  };
+  });
   
-  domHistory.push(snapshot);
   if (domHistory.length > CONFIG.historyLength) {
     domHistory = domHistory.slice(-CONFIG.historyLength);
   }
@@ -429,14 +398,14 @@ function takeDOMSnapshot() {
 
 setInterval(takeDOMSnapshot, CONFIG.snapshotInterval);
 
-// Clean old events periodically
+// Clean old events
 setInterval(() => {
-  const cutoff = Date.now() - 60000; // Keep last 60 seconds of events
-  detectedEvents = detectedEvents.filter(e => e.time > cutoff || e.type !== 'MARKET_ORDER');
+  const cutoff = Date.now() - 120000;
+  detectedEvents = detectedEvents.filter(e => e.time > cutoff);
 }, 10000);
 
 // ═══════════════════════════════════════════════════════════════════
-// CLIENT WEBSOCKET COMMUNICATION
+// CLIENT WEBSOCKET
 // ═══════════════════════════════════════════════════════════════════
 wss.on('connection', (ws) => {
   console.log('[CLIENT] Connected');
@@ -446,26 +415,27 @@ wss.on('connection', (ws) => {
     type: 'INIT',
     config: CONFIG,
     instruments: INSTRUMENTS,
+    timeframes: Object.keys(TIMEFRAMES),
+    candles: candles[CONFIG.currentTimeframe] || [],
     domHistory: domHistory.slice(-200),
-    events: detectedEvents.filter(e => e.type !== 'MARKET_ORDER').slice(-50),
+    events: detectedEvents.slice(-50),
     currentPrice,
   }));
 
-  // Stream updates to client
+  // Stream updates
   const updateInterval = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
-      const significantEvents = detectedEvents.filter(e => 
-        e.type !== 'MARKET_ORDER' && Date.now() - e.time < 5000
-      ).slice(-30);
-      
-      const recentTrades = tradeHistory.slice(-100);
+      const tf = CONFIG.currentTimeframe;
+      const tfCandles = candles[tf] || [];
+      const currentCandle = tfCandles.length > 0 ? tfCandles[tfCandles.length - 1] : null;
       
       ws.send(JSON.stringify({
         type: 'UPDATE',
         orderBook,
         currentPrice,
-        trades: recentTrades,
-        events: significantEvents,
+        currentCandle,
+        trades: tradeHistory.slice(-100),
+        events: detectedEvents.filter(e => Date.now() - e.time < 10000).slice(-30),
         avgTradeSize,
         domSnapshot: domHistory.length > 0 ? domHistory[domHistory.length - 1] : null,
       }));
@@ -491,13 +461,37 @@ wss.on('connection', (ws) => {
           icebergTracker = {};
           avgTradeSize = 0;
           tradeCount = 0;
+          Object.keys(TIMEFRAMES).forEach(tf => { candles[tf] = []; });
           
-          // Reconnect streams
           connectDepthStream();
           connectTradeStream();
           
-          ws.send(JSON.stringify({ type: 'INSTRUMENT_CHANGED', instrument, config: CONFIG }));
+          ws.send(JSON.stringify({ 
+            type: 'INSTRUMENT_CHANGED', instrument, config: CONFIG,
+            candles: [],
+          }));
         }
+      }
+      
+      if (data.type === 'CHANGE_TIMEFRAME') {
+        const tf = data.timeframe;
+        if (TIMEFRAMES[tf]) {
+          CONFIG.currentTimeframe = tf;
+          ws.send(JSON.stringify({
+            type: 'TIMEFRAME_CHANGED',
+            timeframe: tf,
+            candles: candles[tf] || [],
+          }));
+        }
+      }
+      
+      if (data.type === 'GET_CANDLES') {
+        const tf = data.timeframe || CONFIG.currentTimeframe;
+        ws.send(JSON.stringify({
+          type: 'CANDLES_DATA',
+          timeframe: tf,
+          candles: candles[tf] || [],
+        }));
       }
     } catch (e) {}
   });
@@ -515,13 +509,14 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════════╗');
-  console.log('║         FREE BOOKMAP HEATMAP - LIVE TRADING TOOL            ║');
+  console.log('║      FREE BOOKMAP + CANDLESTICK CHART - LIVE TRADING        ║');
   console.log('╠══════════════════════════════════════════════════════════════╣');
   console.log(`║  URL: http://localhost:${PORT}                                 ║`);
   console.log(`║  Default: ${INSTRUMENTS[CONFIG.currentInstrument].name.padEnd(35)}        ║`);
+  console.log('║  Timeframes: 1m | 5m | 15m | 30m | 1h | 4h | 1D            ║');
   console.log('║  Data: Binance WebSocket (FREE, no API key)                 ║');
   console.log('╠══════════════════════════════════════════════════════════════╣');
-  console.log('║  Available Instruments:                                     ║');
+  console.log('║  Instruments:                                               ║');
   Object.entries(INSTRUMENTS).forEach(([key, val]) => {
     console.log(`║    ${key.padEnd(8)} → ${val.name.padEnd(30)}         ║`);
   });

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Free Bookmap Heatmap - Live Trading</title>
+  <title>Free Bookmap + Chart - Live Trading</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     
@@ -15,114 +15,140 @@
       height: 100vh;
     }
 
-    /* TOP BAR */
+    /* ═══ TOP BAR ═══ */
     #topBar {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 8px 16px;
+      padding: 6px 12px;
       background: #111118;
       border-bottom: 1px solid #2a2a3a;
-      height: 48px;
-      z-index: 100;
+      height: 44px;
+      gap: 12px;
     }
 
-    #topBar .logo {
-      font-size: 14px;
+    .logo {
+      font-size: 12px;
       font-weight: bold;
       color: #00e5ff;
       letter-spacing: 1px;
+      white-space: nowrap;
     }
 
-    #topBar .instruments {
+    .instruments {
       display: flex;
-      gap: 6px;
+      gap: 4px;
     }
 
-    .instrument-btn {
-      padding: 4px 12px;
+    .inst-btn {
+      padding: 3px 10px;
       background: #1a1a2e;
       border: 1px solid #333355;
       color: #aaa;
-      border-radius: 4px;
+      border-radius: 3px;
       cursor: pointer;
-      font-size: 11px;
+      font-size: 10px;
       font-family: 'Courier New', monospace;
-      transition: all 0.2s;
+      transition: all 0.15s;
+    }
+    .inst-btn:hover { border-color: #00e5ff; color: #fff; }
+    .inst-btn.active { background: #00344a; border-color: #00e5ff; color: #00e5ff; }
+
+    /* Timeframe buttons */
+    .timeframes {
+      display: flex;
+      gap: 3px;
+      margin-left: 8px;
+      padding-left: 8px;
+      border-left: 1px solid #333;
     }
 
-    .instrument-btn:hover { border-color: #00e5ff; color: #fff; }
-    .instrument-btn.active { background: #00344a; border-color: #00e5ff; color: #00e5ff; }
+    .tf-btn {
+      padding: 3px 8px;
+      background: #1a1a2e;
+      border: 1px solid #2a2a44;
+      color: #888;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 10px;
+      font-family: 'Courier New', monospace;
+      transition: all 0.15s;
+    }
+    .tf-btn:hover { border-color: #ffaa00; color: #fff; }
+    .tf-btn.active { background: #3a2a00; border-color: #ffaa00; color: #ffaa00; }
 
-    #topBar .price-display {
-      font-size: 18px;
-      font-weight: bold;
-      color: #fff;
-      min-width: 160px;
+    /* Zoom controls */
+    .zoom-controls {
+      display: flex;
+      gap: 4px;
+      margin-left: 8px;
+      padding-left: 8px;
+      border-left: 1px solid #333;
+    }
+
+    .zoom-btn {
+      padding: 2px 8px;
+      background: #1a1a2e;
+      border: 1px solid #333;
+      color: #aaa;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+    }
+    .zoom-btn:hover { background: #2a2a3e; color: #fff; }
+
+    /* Price + countdown */
+    .price-area {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .countdown {
+      font-size: 11px;
+      color: #ffaa00;
+      background: #1a1500;
+      padding: 3px 8px;
+      border-radius: 3px;
+      border: 1px solid #4a3500;
+    }
+
+    .price-display {
       text-align: right;
     }
+    .price-display .label { font-size: 9px; color: #555; }
+    .price-display .value { font-size: 16px; font-weight: bold; color: #fff; }
 
-    #topBar .price-display .label { font-size: 10px; color: #666; }
-
-    /* MAIN LAYOUT */
+    /* ═══ MAIN LAYOUT ═══ */
     #mainLayout {
       display: grid;
-      grid-template-columns: 1fr 280px;
-      height: calc(100vh - 48px);
+      grid-template-columns: 1fr 260px;
+      height: calc(100vh - 44px - 20px);
     }
 
-    /* HEATMAP CANVAS */
-    #heatmapContainer {
-      position: relative;
+    /* ═══ CHART AREA ═══ */
+    #chartArea {
+      display: flex;
+      flex-direction: column;
       overflow: hidden;
-      background: #0a0a12;
+      position: relative;
     }
 
-    #heatmapCanvas {
+    /* Candlestick + Heatmap canvas */
+    #chartCanvas {
+      flex: 1;
       display: block;
-      width: 100%;
-      height: 100%;
     }
 
-    /* PRICE AXIS OVERLAY */
-    #priceAxis {
-      position: absolute;
-      right: 0;
-      top: 0;
-      width: 80px;
-      height: 100%;
-      background: rgba(10, 10, 18, 0.85);
-      border-left: 1px solid #222;
-      pointer-events: none;
+    /* Volume canvas */
+    #volumeCanvas {
+      height: 80px;
+      display: block;
+      border-top: 1px solid #1a1a2e;
     }
 
-    /* CURRENT PRICE LINE */
-    #currentPriceLine {
-      position: absolute;
-      left: 0;
-      right: 80px;
-      height: 1px;
-      background: #ffaa00;
-      box-shadow: 0 0 6px #ffaa00;
-      pointer-events: none;
-      transition: top 0.1s linear;
-    }
-
-    #currentPriceTag {
-      position: absolute;
-      right: 0;
-      background: #ffaa00;
-      color: #000;
-      padding: 2px 6px;
-      font-size: 10px;
-      font-weight: bold;
-      border-radius: 2px;
-      transform: translateY(-50%);
-      pointer-events: none;
-      transition: top 0.1s linear;
-    }
-
-    /* RIGHT PANEL */
+    /* ═══ RIGHT PANEL ═══ */
     #rightPanel {
       background: #0d0d15;
       border-left: 1px solid #1a1a2e;
@@ -132,229 +158,225 @@
     }
 
     .panel-section {
-      padding: 10px;
+      padding: 8px;
       border-bottom: 1px solid #1a1a2e;
     }
 
     .panel-title {
-      font-size: 11px;
+      font-size: 10px;
       color: #00e5ff;
       text-transform: uppercase;
       letter-spacing: 1px;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
       font-weight: bold;
     }
 
-    /* DOM / DEPTH LADDER */
+    /* DOM Ladder */
     #domLadder {
       flex: 1;
       overflow-y: auto;
-      padding: 6px;
+      padding: 4px;
     }
 
     .dom-row {
       display: grid;
-      grid-template-columns: 80px 1fr 80px;
+      grid-template-columns: 70px 1fr 70px;
       align-items: center;
-      height: 20px;
-      font-size: 10px;
+      height: 18px;
+      font-size: 9px;
       position: relative;
     }
 
     .dom-row .bid-bar {
       position: absolute;
       right: 50%;
-      height: 18px;
-      background: rgba(0, 200, 83, 0.2);
-      border-right: 1px solid rgba(0, 200, 83, 0.5);
+      height: 16px;
+      background: rgba(0, 200, 83, 0.15);
+      border-right: 1px solid rgba(0, 200, 83, 0.4);
     }
 
     .dom-row .ask-bar {
       position: absolute;
       left: 50%;
-      height: 18px;
-      background: rgba(255, 53, 71, 0.2);
-      border-left: 1px solid rgba(255, 53, 71, 0.5);
+      height: 16px;
+      background: rgba(255, 53, 71, 0.15);
+      border-left: 1px solid rgba(255, 53, 71, 0.4);
     }
 
-    .dom-row .price-cell {
-      text-align: center;
-      z-index: 1;
-      font-weight: bold;
-      color: #ddd;
-    }
+    .dom-row .price-cell { text-align: center; z-index: 1; font-weight: bold; color: #ccc; }
+    .dom-row .qty-bid { text-align: right; color: #00c853; z-index: 1; padding-right: 4px; }
+    .dom-row .qty-ask { text-align: left; color: #ff3547; z-index: 1; padding-left: 4px; }
+    .dom-row.spread-row { background: #1a1a2e; justify-content: center; }
 
-    .dom-row .qty-bid { text-align: right; color: #00c853; z-index: 1; }
-    .dom-row .qty-ask { text-align: left; color: #ff3547; z-index: 1; }
-
-    /* EVENTS LOG */
+    /* Events */
     #eventsLog {
-      height: 200px;
+      height: 180px;
       overflow-y: auto;
-      padding: 6px;
-      font-size: 10px;
+      padding: 4px;
+      font-size: 9px;
     }
 
     .event-item {
-      padding: 3px 6px;
-      margin-bottom: 2px;
+      padding: 2px 5px;
+      margin-bottom: 1px;
       border-radius: 2px;
-      background: #111;
+      background: #0f0f18;
       border-left: 3px solid #333;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
 
-    .event-item.aggressive-buy { border-left-color: #00e676; color: #00e676; }
-    .event-item.aggressive-sell { border-left-color: #ff1744; color: #ff1744; }
-    .event-item.order-pull { border-left-color: #ffab00; color: #ffab00; }
-    .event-item.order-stack { border-left-color: #7c4dff; color: #7c4dff; }
-    .event-item.iceberg { border-left-color: #00b8d4; color: #00b8d4; }
-    .event-item.resting { border-left-color: #fff; color: #aaa; }
+    .event-item.agg-buy { border-left-color: #00e676; color: #00e676; }
+    .event-item.agg-sell { border-left-color: #ff1744; color: #ff1744; }
+    .event-item.pull { border-left-color: #ffab00; color: #ffab00; }
+    .event-item.stack { border-left-color: #7c4dff; color: #7c4dff; }
+    .event-item.iceberg { border-left-color: #00e5ff; color: #00e5ff; }
 
-    /* STATS */
+    /* Stats */
     #statsPanel {
-      padding: 8px 10px;
-      font-size: 10px;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 4px;
-    }
-
-    .stat-item { display: flex; justify-content: space-between; }
-    .stat-label { color: #666; }
-    .stat-value { color: #fff; font-weight: bold; }
-    .stat-value.buy { color: #00c853; }
-    .stat-value.sell { color: #ff3547; }
-
-    /* LEGEND */
-    #legend {
-      padding: 8px 10px;
-      font-size: 9px;
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 3px;
+      font-size: 9px;
     }
 
-    .legend-item {
-      display: flex;
-      align-items: center;
-      gap: 4px;
+    .stat-row { display: flex; justify-content: space-between; }
+    .stat-label { color: #555; }
+    .stat-val { font-weight: bold; }
+    .stat-val.green { color: #00c853; }
+    .stat-val.red { color: #ff3547; }
+
+    /* Legend */
+    #legend {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2px;
+      font-size: 8px;
     }
 
-    .legend-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 2px;
-    }
+    .legend-item { display: flex; align-items: center; gap: 3px; }
+    .legend-dot { width: 7px; height: 7px; border-radius: 2px; }
 
-    /* STATUS */
+    /* ═══ STATUS BAR ═══ */
     #statusBar {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      height: 22px;
+      height: 20px;
       background: #111118;
       border-top: 1px solid #222;
       display: flex;
       align-items: center;
-      padding: 0 16px;
-      font-size: 10px;
-      color: #555;
-      gap: 20px;
-      z-index: 100;
+      padding: 0 12px;
+      font-size: 9px;
+      color: #444;
+      gap: 16px;
     }
 
     .status-dot {
-      width: 6px;
-      height: 6px;
+      width: 6px; height: 6px;
       border-radius: 50%;
       background: #ff3547;
-      margin-right: 4px;
       display: inline-block;
+      margin-right: 4px;
     }
-
-    .status-dot.connected { background: #00e676; }
+    .status-dot.on { background: #00e676; }
 
     /* Scrollbar */
-    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar { width: 3px; }
     ::-webkit-scrollbar-track { background: #0a0a0f; }
     ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+    /* Crosshair tooltip */
+    #crosshairInfo {
+      position: fixed;
+      background: rgba(20, 20, 30, 0.95);
+      border: 1px solid #333;
+      padding: 4px 8px;
+      font-size: 9px;
+      border-radius: 3px;
+      pointer-events: none;
+      display: none;
+      z-index: 1000;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
   <!-- TOP BAR -->
   <div id="topBar">
-    <div class="logo">BOOKMAP HEATMAP</div>
-    <div class="instruments" id="instrumentButtons"></div>
-    <div class="price-display">
-      <div class="label">LAST PRICE</div>
-      <div id="priceValue">--</div>
+    <div class="logo">BOOKMAP PRO</div>
+    <div class="instruments" id="instrumentBtns"></div>
+    <div class="timeframes" id="timeframeBtns"></div>
+    <div class="zoom-controls">
+      <button class="zoom-btn" id="zoomIn">+</button>
+      <button class="zoom-btn" id="zoomOut">−</button>
+      <button class="zoom-btn" id="zoomReset">⟲</button>
+    </div>
+    <div class="price-area">
+      <div class="countdown" id="countdown">Next close: --:--</div>
+      <div class="price-display">
+        <div class="label">LAST</div>
+        <div class="value" id="priceValue">--</div>
+      </div>
     </div>
   </div>
 
   <!-- MAIN -->
   <div id="mainLayout">
-    <!-- HEATMAP -->
-    <div id="heatmapContainer">
-      <canvas id="heatmapCanvas"></canvas>
-      <div id="currentPriceLine"></div>
-      <div id="currentPriceTag"></div>
+    <div id="chartArea">
+      <canvas id="chartCanvas"></canvas>
+      <canvas id="volumeCanvas"></canvas>
     </div>
 
-    <!-- RIGHT PANEL -->
     <div id="rightPanel">
-      <!-- STATS -->
       <div class="panel-section">
-        <div class="panel-title">Market Stats</div>
+        <div class="panel-title">Stats</div>
         <div id="statsPanel">
-          <div class="stat-item"><span class="stat-label">Bid Vol:</span><span class="stat-value buy" id="statBidVol">0</span></div>
-          <div class="stat-item"><span class="stat-label">Ask Vol:</span><span class="stat-value sell" id="statAskVol">0</span></div>
-          <div class="stat-item"><span class="stat-label">Buy Pwr:</span><span class="stat-value buy" id="statBuyPwr">0</span></div>
-          <div class="stat-item"><span class="stat-label">Sell Pwr:</span><span class="stat-value sell" id="statSellPwr">0</span></div>
-          <div class="stat-item"><span class="stat-label">Spread:</span><span class="stat-value" id="statSpread">0</span></div>
-          <div class="stat-item"><span class="stat-label">Imbal:</span><span class="stat-value" id="statImbalance">0%</span></div>
+          <div class="stat-row"><span class="stat-label">Bid Vol</span><span class="stat-val green" id="sBidVol">0</span></div>
+          <div class="stat-row"><span class="stat-label">Ask Vol</span><span class="stat-val red" id="sAskVol">0</span></div>
+          <div class="stat-row"><span class="stat-label">Buy Pwr</span><span class="stat-val green" id="sBuyPwr">0</span></div>
+          <div class="stat-row"><span class="stat-label">Sell Pwr</span><span class="stat-val red" id="sSellPwr">0</span></div>
+          <div class="stat-row"><span class="stat-label">Spread</span><span class="stat-val" id="sSpread">0</span></div>
+          <div class="stat-row"><span class="stat-label">Imbal</span><span class="stat-val" id="sImbal">0%</span></div>
         </div>
       </div>
 
-      <!-- DOM LADDER -->
       <div class="panel-section" style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
-        <div class="panel-title">Depth of Market (DOM)</div>
+        <div class="panel-title">DOM (Depth)</div>
         <div id="domLadder"></div>
       </div>
 
-      <!-- EVENTS -->
-      <div class="panel-section" style="height:220px;">
+      <div class="panel-section" style="height:200px;">
         <div class="panel-title">Order Flow Events</div>
         <div id="eventsLog"></div>
       </div>
 
-      <!-- LEGEND -->
       <div class="panel-section">
-        <div class="panel-title">Heatmap Legend</div>
+        <div class="panel-title">Legend</div>
         <div id="legend">
-          <div class="legend-item"><div class="legend-dot" style="background:#00c853"></div>Bid Liquidity</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#ff3547"></div>Ask Liquidity</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#ffaa00"></div>Current Price</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#00c853"></div>Bid Liq.</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#ff3547"></div>Ask Liq.</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#ffaa00"></div>Price</div>
           <div class="legend-item"><div class="legend-dot" style="background:#00e5ff"></div>Iceberg</div>
           <div class="legend-item"><div class="legend-dot" style="background:#7c4dff"></div>Stacking</div>
           <div class="legend-item"><div class="legend-dot" style="background:#ffab00"></div>Pulling</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#00e676"></div>Agg. Buy</div>
-          <div class="legend-item"><div class="legend-dot" style="background:#ff1744"></div>Agg. Sell</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#00e676"></div>Agg Buy</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#ff1744"></div>Agg Sell</div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- STATUS BAR -->
+  <!-- STATUS -->
   <div id="statusBar">
-    <span><span class="status-dot" id="connectionDot"></span><span id="connectionStatus">Connecting...</span></span>
-    <span id="statusInstrument">--</span>
-    <span id="statusUpdates">0 updates/s</span>
-    <span id="statusEvents">0 events</span>
+    <span><span class="status-dot" id="connDot"></span><span id="connText">Connecting...</span></span>
+    <span id="sInstrument">--</span>
+    <span id="sTimeframe">1m</span>
+    <span id="sUpdates">0/s</span>
+    <span id="sCandles">0 candles</span>
   </div>
+
+  <!-- Crosshair tooltip -->
+  <div id="crosshairInfo"></div>
 
   <script src="app.js"></script>
 </body>

@@ -1,686 +1,845 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- *  FREE BOOKMAP HEATMAP - Frontend Application
- *  Canvas-based heatmap with real-time order book visualization
+ *  FREE BOOKMAP + CANDLESTICK CHART - Frontend
+ *  Canvas-based: Candles + Volume + Heatmap + Order Flow
  * ═══════════════════════════════════════════════════════════════════
  */
 
 // ═══════════════════════════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════════════════════════
-const state = {
+const S = {
   ws: null,
   connected: false,
-  currentInstrument: 'XAUUSD',
   instruments: {},
+  currentInstrument: 'XAUUSD',
+  currentTimeframe: '1m',
+  timeframes: ['1m','5m','15m','30m','1h','4h','1D'],
   currentPrice: 0,
   orderBook: { bids: {}, asks: {} },
+  candles: [],
   trades: [],
   events: [],
-  domHistory: [], // Array of {time, price, bids:{}, asks:{}}
+  domHistory: [],
+  avgTradeSize: 0,
   
-  // Heatmap settings
-  priceRange: 0,
-  priceCenter: 0,
-  zoomLevel: 1,
-  maxQty: 1,
+  // Chart state
+  zoom: 1,
+  offset: 0, // scroll offset (candles from right)
+  visibleCandles: 80,
+  crosshair: null,
+  dragging: false,
+  dragStartX: 0,
+  dragStartOffset: 0,
   
   // Performance
   updateCount: 0,
   lastCountReset: Date.now(),
-  updatesPerSecond: 0,
+  ups: 0,
+};
+
+// Timeframe durations in ms
+const TF_MS = {
+  '1m': 60000, '5m': 300000, '15m': 900000,
+  '30m': 1800000, '1h': 3600000, '4h': 14400000, '1D': 86400000,
 };
 
 // ═══════════════════════════════════════════════════════════════════
 // CANVAS SETUP
 // ═══════════════════════════════════════════════════════════════════
-const canvas = document.getElementById('heatmapCanvas');
-const ctx = canvas.getContext('2d');
-let canvasWidth, canvasHeight;
+const chartCanvas = document.getElementById('chartCanvas');
+const chartCtx = chartCanvas.getContext('2d');
+const volCanvas = document.getElementById('volumeCanvas');
+const volCtx = volCanvas.getContext('2d');
 
-function resizeCanvas() {
-  const container = document.getElementById('heatmapContainer');
-  canvasWidth = container.clientWidth;
-  canvasHeight = container.clientHeight;
-  canvas.width = canvasWidth * window.devicePixelRatio;
-  canvas.height = canvasHeight * window.devicePixelRatio;
-  canvas.style.width = canvasWidth + 'px';
-  canvas.style.height = canvasHeight + 'px';
-  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+let chartW, chartH, volW, volH;
+const PRICE_AXIS_W = 70;
+
+function resizeCanvases() {
+  const chartArea = document.getElementById('chartArea');
+  const volEl = document.getElementById('volumeCanvas');
+  
+  chartW = chartArea.clientWidth;
+  chartH = chartArea.clientHeight - 80; // subtract volume height
+  volW = chartArea.clientWidth;
+  volH = 80;
+  
+  const dpr = window.devicePixelRatio || 1;
+  
+  chartCanvas.width = chartW * dpr;
+  chartCanvas.height = chartH * dpr;
+  chartCanvas.style.width = chartW + 'px';
+  chartCanvas.style.height = chartH + 'px';
+  chartCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  
+  volCanvas.width = volW * dpr;
+  volCanvas.height = volH * dpr;
+  volCanvas.style.width = volW + 'px';
+  volCanvas.style.height = volH + 'px';
+  volCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
+window.addEventListener('resize', resizeCanvases);
+setTimeout(resizeCanvases, 50);
+resizeCanvases();
+
+
 
 // ═══════════════════════════════════════════════════════════════════
-// WEBSOCKET CONNECTION
+// WEBSOCKET
 // ═══════════════════════════════════════════════════════════════════
 function connect() {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  state.ws = new WebSocket(`${protocol}//${location.host}`);
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  S.ws = new WebSocket(`${proto}//${location.host}`);
   
-  state.ws.onopen = () => {
-    state.connected = true;
-    updateConnectionStatus(true);
-    console.log('[WS] Connected');
+  S.ws.onopen = () => {
+    S.connected = true;
+    setConnectionUI(true);
   };
   
-  state.ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    handleMessage(data);
+  S.ws.onmessage = (e) => {
+    S.updateCount++;
+    const d = JSON.parse(e.data);
+    handleMsg(d);
   };
   
-  state.ws.onclose = () => {
-    state.connected = false;
-    updateConnectionStatus(false);
+  S.ws.onclose = () => {
+    S.connected = false;
+    setConnectionUI(false);
     setTimeout(connect, 2000);
   };
   
-  state.ws.onerror = () => {
-    state.connected = false;
-  };
+  S.ws.onerror = () => { S.connected = false; };
 }
 
-function handleMessage(data) {
-  state.updateCount++;
-  
-  switch (data.type) {
+function send(obj) {
+  if (S.ws && S.ws.readyState === WebSocket.OPEN) {
+    S.ws.send(JSON.stringify(obj));
+  }
+}
+
+function handleMsg(d) {
+  switch (d.type) {
     case 'INIT':
-      state.instruments = data.instruments || {};
-      state.currentInstrument = data.config.currentInstrument;
-      state.domHistory = data.domHistory || [];
-      state.events = data.events || [];
-      state.currentPrice = data.currentPrice;
-      buildInstrumentButtons();
+      S.instruments = d.instruments || {};
+      S.currentInstrument = d.config.currentInstrument;
+      S.currentTimeframe = d.config.currentTimeframe;
+      S.timeframes = d.timeframes || S.timeframes;
+      S.candles = d.candles || [];
+      S.domHistory = d.domHistory || [];
+      S.events = d.events || [];
+      S.currentPrice = d.currentPrice;
+      buildButtons();
       break;
       
     case 'UPDATE':
-      state.orderBook = data.orderBook;
-      state.currentPrice = data.currentPrice;
-      state.trades = data.trades || [];
+      S.orderBook = d.orderBook;
+      S.currentPrice = d.currentPrice;
+      S.trades = d.trades || [];
+      S.avgTradeSize = d.avgTradeSize || 0;
       
-      // Merge events
-      if (data.events) {
-        data.events.forEach(e => {
-          if (!state.events.find(ex => ex.time === e.time && ex.type === e.type && ex.price === e.price)) {
-            state.events.push(e);
+      // Update current candle
+      if (d.currentCandle && S.candles.length > 0) {
+        const last = S.candles[S.candles.length - 1];
+        if (last.openTime === d.currentCandle.openTime) {
+          S.candles[S.candles.length - 1] = d.currentCandle;
+        } else {
+          S.candles.push(d.currentCandle);
+        }
+      } else if (d.currentCandle && S.candles.length === 0) {
+        S.candles.push(d.currentCandle);
+      }
+      
+      // Events
+      if (d.events) {
+        d.events.forEach(ev => {
+          if (!S.events.find(x => x.time === ev.time && x.type === ev.type && x.price === ev.price)) {
+            S.events.push(ev);
           }
         });
-        // Keep limited
-        if (state.events.length > 200) state.events = state.events.slice(-200);
+        if (S.events.length > 200) S.events = S.events.slice(-200);
       }
       
-      // Add to DOM history
-      if (data.domSnapshot) {
-        state.domHistory.push(data.domSnapshot);
-        if (state.domHistory.length > 400) state.domHistory = state.domHistory.slice(-400);
-      }
-      
-      // Auto-detect price range
-      if (state.currentPrice > 0) {
-        updatePriceRange();
+      // DOM
+      if (d.domSnapshot) {
+        S.domHistory.push(d.domSnapshot);
+        if (S.domHistory.length > 400) S.domHistory = S.domHistory.slice(-400);
       }
       break;
       
     case 'INSTRUMENT_CHANGED':
-      state.currentInstrument = data.instrument;
-      state.domHistory = [];
-      state.events = [];
-      state.trades = [];
-      setActiveInstrument(data.instrument);
+      S.currentInstrument = d.instrument;
+      S.candles = d.candles || [];
+      S.domHistory = [];
+      S.events = [];
+      S.offset = 0;
+      setActiveBtn('.inst-btn', d.instrument);
+      break;
+      
+    case 'TIMEFRAME_CHANGED':
+      S.currentTimeframe = d.timeframe;
+      S.candles = d.candles || [];
+      S.offset = 0;
+      setActiveBtn('.tf-btn', d.timeframe);
+      document.getElementById('sTimeframe').textContent = d.timeframe;
+      break;
+      
+    case 'CANDLES_DATA':
+      S.candles = d.candles || [];
+      S.offset = 0;
       break;
   }
 }
 
-function updatePriceRange() {
-  const allPrices = [
-    ...Object.keys(state.orderBook.bids).map(Number),
-    ...Object.keys(state.orderBook.asks).map(Number),
-  ];
-  
-  if (allPrices.length < 2) return;
-  
-  const minPrice = Math.min(...allPrices);
-  const maxPrice = Math.max(...allPrices);
-  const range = maxPrice - minPrice;
-  
-  // Smooth transition
-  const targetCenter = state.currentPrice;
-  const targetRange = range * 1.2 / state.zoomLevel;
-  
-  state.priceCenter = state.priceCenter === 0 ? targetCenter : state.priceCenter * 0.95 + targetCenter * 0.05;
-  state.priceRange = state.priceRange === 0 ? targetRange : state.priceRange * 0.98 + targetRange * 0.02;
-}
+
 
 // ═══════════════════════════════════════════════════════════════════
-// HEATMAP RENDERING
+// CANDLESTICK CHART RENDERING
 // ═══════════════════════════════════════════════════════════════════
-function renderHeatmap() {
-  ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+function renderChart() {
+  chartCtx.clearRect(0, 0, chartW, chartH);
   
-  if (state.domHistory.length < 2 || state.priceRange === 0) {
-    renderWaitingScreen();
+  if (S.candles.length < 1) {
+    renderWaiting();
     return;
   }
   
-  const rightMargin = 80; // Price axis
-  const drawWidth = canvasWidth - rightMargin;
-  const drawHeight = canvasHeight;
+  const drawW = chartW - PRICE_AXIS_W;
+  const numCandles = Math.floor(S.visibleCandles / S.zoom);
+  const startIdx = Math.max(0, S.candles.length - numCandles - S.offset);
+  const endIdx = Math.min(S.candles.length, startIdx + numCandles);
+  const visible = S.candles.slice(startIdx, endIdx);
   
-  const priceTop = state.priceCenter + state.priceRange / 2;
-  const priceBottom = state.priceCenter - state.priceRange / 2;
+  if (visible.length === 0) { renderWaiting(); return; }
   
-  // Calculate max quantity for color scaling
-  let maxQ = 0;
-  state.domHistory.forEach(snap => {
-    Object.values(snap.bids).forEach(q => { if (q > maxQ) maxQ = q; });
-    Object.values(snap.asks).forEach(q => { if (q > maxQ) maxQ = q; });
+  // Calculate price range
+  let high = -Infinity, low = Infinity;
+  visible.forEach(c => {
+    if (c.high > high) high = c.high;
+    if (c.low < low) low = c.low;
   });
-  state.maxQty = maxQ || 1;
   
-  // Draw heatmap columns (each DOM snapshot = 1 column)
-  const histLen = state.domHistory.length;
-  const colWidth = drawWidth / Math.min(histLen, 400);
+  const padding = (high - low) * 0.08 || high * 0.001;
+  high += padding;
+  low -= padding;
+  const priceRange = high - low || 1;
   
-  for (let i = 0; i < histLen; i++) {
-    const snap = state.domHistory[i];
-    const x = (i / histLen) * drawWidth;
+  const candleW = drawW / numCandles;
+  const bodyW = Math.max(1, candleW * 0.7);
+  const wickW = Math.max(1, candleW * 0.1);
+  
+  // ─── Draw grid ───
+  renderGrid(drawW, high, low, priceRange);
+  
+  // ─── Draw heatmap behind candles ───
+  renderHeatmapOverlay(drawW, high, low, priceRange, visible);
+  
+  // ─── Draw candles ───
+  visible.forEach((candle, i) => {
+    const x = i * candleW + candleW / 2;
+    const isGreen = candle.close >= candle.open;
     
-    // Draw bids (green)
-    for (const [price, qty] of Object.entries(snap.bids)) {
-      const p = parseFloat(price);
-      if (p < priceBottom || p > priceTop) continue;
-      
-      const y = ((priceTop - p) / state.priceRange) * drawHeight;
-      const intensity = Math.min(qty / state.maxQty, 1);
-      
-      ctx.fillStyle = getBidColor(intensity);
-      ctx.fillRect(x, y - 1, colWidth + 1, 3);
-    }
+    const openY = ((high - candle.open) / priceRange) * chartH;
+    const closeY = ((high - candle.close) / priceRange) * chartH;
+    const highY = ((high - candle.high) / priceRange) * chartH;
+    const lowY = ((high - candle.low) / priceRange) * chartH;
     
-    // Draw asks (red)
-    for (const [price, qty] of Object.entries(snap.asks)) {
-      const p = parseFloat(price);
-      if (p < priceBottom || p > priceTop) continue;
-      
-      const y = ((priceTop - p) / state.priceRange) * drawHeight;
-      const intensity = Math.min(qty / state.maxQty, 1);
-      
-      ctx.fillStyle = getAskColor(intensity);
-      ctx.fillRect(x, y - 1, colWidth + 1, 3);
-    }
+    // Wick
+    chartCtx.strokeStyle = isGreen ? '#26a69a' : '#ef5350';
+    chartCtx.lineWidth = Math.max(1, wickW);
+    chartCtx.beginPath();
+    chartCtx.moveTo(x, highY);
+    chartCtx.lineTo(x, lowY);
+    chartCtx.stroke();
     
-    // Draw price line for this snapshot
-    if (snap.price > priceBottom && snap.price < priceTop) {
-      const priceY = ((priceTop - snap.price) / state.priceRange) * drawHeight;
-      ctx.fillStyle = 'rgba(255, 170, 0, 0.6)';
-      ctx.fillRect(x, priceY, colWidth + 1, 1);
+    // Body
+    const bodyTop = Math.min(openY, closeY);
+    const bodyHeight = Math.max(1, Math.abs(closeY - openY));
+    
+    if (isGreen) {
+      chartCtx.fillStyle = '#26a69a';
+    } else {
+      chartCtx.fillStyle = '#ef5350';
     }
+    chartCtx.fillRect(x - bodyW / 2, bodyTop, bodyW, bodyHeight);
+  });
+  
+  // ─── Draw event markers on chart ───
+  renderChartEvents(drawW, high, low, priceRange, visible);
+  
+  // ─── Current price line ───
+  if (S.currentPrice > low && S.currentPrice < high) {
+    const priceY = ((high - S.currentPrice) / priceRange) * chartH;
+    chartCtx.setLineDash([4, 3]);
+    chartCtx.strokeStyle = '#ffaa00';
+    chartCtx.lineWidth = 1;
+    chartCtx.beginPath();
+    chartCtx.moveTo(0, priceY);
+    chartCtx.lineTo(drawW, priceY);
+    chartCtx.stroke();
+    chartCtx.setLineDash([]);
+    
+    // Price tag
+    chartCtx.fillStyle = '#ffaa00';
+    chartCtx.fillRect(drawW, priceY - 8, PRICE_AXIS_W, 16);
+    chartCtx.fillStyle = '#000';
+    chartCtx.font = '10px Courier New';
+    chartCtx.textAlign = 'left';
+    chartCtx.fillText(formatPrice(S.currentPrice), drawW + 4, priceY + 3);
   }
   
-  // Draw trade markers
-  renderTrades(drawWidth, drawHeight, priceTop, priceBottom, histLen);
+  // ─── Price axis ───
+  renderPriceAxis(drawW, high, low, priceRange);
   
-  // Draw event markers
-  renderEventMarkers(drawWidth, drawHeight, priceTop, priceBottom, histLen);
+  // ─── Crosshair ───
+  if (S.crosshair) {
+    renderCrosshair(drawW, high, low, priceRange, visible, numCandles);
+  }
+}
+
+function renderGrid(drawW, high, low, priceRange) {
+  const numLines = 8;
+  chartCtx.strokeStyle = 'rgba(40, 40, 60, 0.4)';
+  chartCtx.lineWidth = 0.5;
+  chartCtx.setLineDash([2, 4]);
   
-  // Draw price axis
-  renderPriceAxis(drawWidth, drawHeight, priceTop, priceBottom);
-  
-  // Draw time axis hint
-  renderTimeAxis(drawWidth, drawHeight);
-  
-  // Update current price indicator position
-  updatePriceIndicator(drawHeight, priceTop, priceBottom);
+  for (let i = 0; i <= numLines; i++) {
+    const y = (i / numLines) * chartH;
+    chartCtx.beginPath();
+    chartCtx.moveTo(0, y);
+    chartCtx.lineTo(drawW, y);
+    chartCtx.stroke();
+  }
+  chartCtx.setLineDash([]);
 }
 
-function getBidColor(intensity) {
-  if (intensity < 0.1) return `rgba(0, 100, 40, ${0.1 + intensity * 2})`;
-  if (intensity < 0.3) return `rgba(0, 150, 60, ${0.3 + intensity})`;
-  if (intensity < 0.6) return `rgba(0, 200, 80, ${0.5 + intensity * 0.5})`;
-  return `rgba(0, 255, 100, ${0.7 + intensity * 0.3})`;
-}
-
-function getAskColor(intensity) {
-  if (intensity < 0.1) return `rgba(100, 20, 30, ${0.1 + intensity * 2})`;
-  if (intensity < 0.3) return `rgba(180, 30, 50, ${0.3 + intensity})`;
-  if (intensity < 0.6) return `rgba(220, 40, 60, ${0.5 + intensity * 0.5})`;
-  return `rgba(255, 50, 70, ${0.7 + intensity * 0.3})`;
-}
-
-function renderTrades(drawWidth, drawHeight, priceTop, priceBottom, histLen) {
-  if (state.trades.length === 0) return;
-  
-  const now = Date.now();
-  const timeWindow = state.domHistory.length > 1 
-    ? state.domHistory[state.domHistory.length - 1].time - state.domHistory[0].time 
-    : 60000;
-  const startTime = state.domHistory.length > 0 ? state.domHistory[0].time : now - timeWindow;
-  
-  state.trades.forEach(trade => {
-    if (trade.price < priceBottom || trade.price > priceTop) return;
-    
-    const x = ((trade.time - startTime) / timeWindow) * drawWidth;
-    if (x < 0 || x > drawWidth) return;
-    
-    const y = ((priceTop - trade.price) / state.priceRange) * drawHeight;
-    const size = Math.max(2, Math.min(8, trade.qty / (state.maxQty * 0.1) * 4));
-    
-    ctx.beginPath();
-    ctx.arc(x, y, size, 0, Math.PI * 2);
-    ctx.fillStyle = trade.isBuy 
-      ? `rgba(0, 230, 118, 0.7)` 
-      : `rgba(255, 23, 68, 0.7)`;
-    ctx.fill();
-  });
-}
-
-function renderEventMarkers(drawWidth, drawHeight, priceTop, priceBottom, histLen) {
-  const now = Date.now();
-  const timeWindow = state.domHistory.length > 1 
-    ? state.domHistory[state.domHistory.length - 1].time - state.domHistory[0].time 
-    : 60000;
-  const startTime = state.domHistory.length > 0 ? state.domHistory[0].time : now - timeWindow;
-  
-  state.events.forEach(event => {
-    if (!event.price || event.price < priceBottom || event.price > priceTop) return;
-    
-    const x = ((event.time - startTime) / timeWindow) * drawWidth;
-    if (x < 0 || x > drawWidth) return;
-    
-    const y = ((priceTop - event.price) / state.priceRange) * drawHeight;
-    
-    switch (event.type) {
-      case 'AGGRESSIVE_BUY':
-        drawMarker(x, y, '▲', '#00e676', 12);
-        break;
-      case 'AGGRESSIVE_SELL':
-        drawMarker(x, y, '▼', '#ff1744', 12);
-        break;
-      case 'ORDER_PULL':
-        drawDiamond(x, y, '#ffab00', 5);
-        break;
-      case 'ORDER_STACK':
-        drawSquare(x, y, '#7c4dff', 5);
-        break;
-      case 'ICEBERG':
-        drawIcebergMarker(x, y);
-        break;
-    }
-  });
-}
-
-function drawMarker(x, y, char, color, size) {
-  ctx.font = `${size}px monospace`;
-  ctx.fillStyle = color;
-  ctx.textAlign = 'center';
-  ctx.fillText(char, x, y + size / 3);
-}
-
-function drawDiamond(x, y, color, size) {
-  ctx.beginPath();
-  ctx.moveTo(x, y - size);
-  ctx.lineTo(x + size, y);
-  ctx.lineTo(x, y + size);
-  ctx.lineTo(x - size, y);
-  ctx.closePath();
-  ctx.fillStyle = color;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = 0.5;
-  ctx.stroke();
-}
-
-function drawSquare(x, y, color, size) {
-  ctx.fillStyle = color;
-  ctx.fillRect(x - size, y - size, size * 2, size * 2);
-  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-  ctx.lineWidth = 0.5;
-  ctx.strokeRect(x - size, y - size, size * 2, size * 2);
-}
-
-function drawIcebergMarker(x, y) {
-  ctx.beginPath();
-  ctx.moveTo(x - 5, y - 3);
-  ctx.lineTo(x + 5, y - 3);
-  ctx.lineTo(x + 3, y + 4);
-  ctx.lineTo(x - 3, y + 4);
-  ctx.closePath();
-  ctx.fillStyle = '#00e5ff';
-  ctx.fill();
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 0.5;
-  ctx.stroke();
-}
-
-function renderPriceAxis(drawWidth, drawHeight, priceTop, priceBottom) {
-  const axisX = drawWidth;
-  
+function renderPriceAxis(drawW, high, low, priceRange) {
   // Background
-  ctx.fillStyle = 'rgba(10, 10, 18, 0.9)';
-  ctx.fillRect(axisX, 0, 80, drawHeight);
+  chartCtx.fillStyle = 'rgba(13, 13, 21, 0.95)';
+  chartCtx.fillRect(drawW, 0, PRICE_AXIS_W, chartH);
   
   // Border
-  ctx.strokeStyle = '#222';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(axisX, 0);
-  ctx.lineTo(axisX, drawHeight);
-  ctx.stroke();
+  chartCtx.strokeStyle = '#1a1a2e';
+  chartCtx.lineWidth = 1;
+  chartCtx.beginPath();
+  chartCtx.moveTo(drawW, 0);
+  chartCtx.lineTo(drawW, chartH);
+  chartCtx.stroke();
   
-  // Price labels
-  const numLabels = Math.floor(drawHeight / 40);
-  ctx.font = '10px Courier New';
-  ctx.fillStyle = '#888';
-  ctx.textAlign = 'left';
+  // Labels
+  const numLabels = 10;
+  chartCtx.font = '9px Courier New';
+  chartCtx.fillStyle = '#666';
+  chartCtx.textAlign = 'left';
   
   for (let i = 0; i <= numLabels; i++) {
-    const y = (i / numLabels) * drawHeight;
-    const price = priceTop - (i / numLabels) * state.priceRange;
-    
-    // Grid line
-    ctx.strokeStyle = 'rgba(50, 50, 70, 0.3)';
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(axisX, y);
-    ctx.stroke();
-    
-    // Price text
-    ctx.fillStyle = '#888';
-    ctx.fillText(formatPrice(price), axisX + 4, y + 3);
+    const y = (i / numLabels) * chartH;
+    const price = high - (i / numLabels) * priceRange;
+    chartCtx.fillText(formatPrice(price), drawW + 4, y + 3);
   }
 }
 
-function renderTimeAxis(drawWidth, drawHeight) {
-  if (state.domHistory.length < 2) return;
-  
-  const startTime = state.domHistory[0].time;
-  const endTime = state.domHistory[state.domHistory.length - 1].time;
-  const duration = endTime - startTime;
-  
-  ctx.font = '9px Courier New';
-  ctx.fillStyle = '#444';
-  ctx.textAlign = 'center';
-  
-  const numLabels = 6;
-  for (let i = 0; i <= numLabels; i++) {
-    const x = (i / numLabels) * drawWidth;
-    const time = new Date(startTime + (i / numLabels) * duration);
-    const label = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    ctx.fillText(label, x, drawHeight - 4);
-  }
-}
-
-function renderWaitingScreen() {
-  ctx.fillStyle = '#111';
-  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-  
-  ctx.font = '16px Courier New';
-  ctx.fillStyle = '#00e5ff';
-  ctx.textAlign = 'center';
-  ctx.fillText('Connecting to live market data...', canvasWidth / 2, canvasHeight / 2 - 20);
-  
-  ctx.font = '12px Courier New';
-  ctx.fillStyle = '#555';
-  ctx.fillText('Building heatmap history - please wait 5-10 seconds', canvasWidth / 2, canvasHeight / 2 + 10);
-}
-
-function updatePriceIndicator(drawHeight, priceTop, priceBottom) {
-  if (state.currentPrice === 0 || state.priceRange === 0) return;
-  
-  const y = ((priceTop - state.currentPrice) / state.priceRange) * drawHeight;
-  const priceLine = document.getElementById('currentPriceLine');
-  const priceTag = document.getElementById('currentPriceTag');
-  
-  priceLine.style.top = y + 48 + 'px'; // offset for top bar
-  priceTag.style.top = y + 48 + 'px';
-  priceTag.textContent = formatPrice(state.currentPrice);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// DOM LADDER RENDERING
-// ═══════════════════════════════════════════════════════════════════
-function renderDOMLadder() {
-  const container = document.getElementById('domLadder');
-  if (!state.currentPrice || Object.keys(state.orderBook.bids).length === 0) return;
-  
-  const bids = Object.entries(state.orderBook.bids)
-    .map(([p, q]) => ({ price: parseFloat(p), qty: q }))
-    .sort((a, b) => b.price - a.price)
-    .slice(0, 12);
-    
-  const asks = Object.entries(state.orderBook.asks)
-    .map(([p, q]) => ({ price: parseFloat(p), qty: q }))
-    .sort((a, b) => a.price - b.price)
-    .slice(0, 12);
+function renderHeatmapOverlay(drawW, high, low, priceRange, visible) {
+  // Show order book depth as colored bands behind candles
+  if (Object.keys(S.orderBook.bids).length === 0) return;
   
   const maxQty = Math.max(
-    ...bids.map(b => b.qty),
-    ...asks.map(a => a.qty),
+    ...Object.values(S.orderBook.bids),
+    ...Object.values(S.orderBook.asks),
     1
   );
   
-  let html = '';
-  
-  // Asks (top, reversed so highest is on top)
-  asks.reverse().forEach(level => {
-    const pct = (level.qty / maxQty) * 100;
-    html += `<div class="dom-row">
-      <div class="qty-bid"></div>
-      <div class="price-cell" style="color:#ff5555">${formatPrice(level.price)}</div>
-      <div class="qty-ask">${level.qty.toFixed(4)}</div>
-      <div class="ask-bar" style="width:${pct * 0.5}%"></div>
-    </div>`;
+  // Draw bids
+  Object.entries(S.orderBook.bids).forEach(([price, qty]) => {
+    const p = parseFloat(price);
+    if (p < low || p > high) return;
+    const y = ((high - p) / priceRange) * chartH;
+    const intensity = Math.min(qty / maxQty, 1);
+    const alpha = 0.05 + intensity * 0.2;
+    chartCtx.fillStyle = `rgba(0, 200, 83, ${alpha})`;
+    chartCtx.fillRect(0, y - 1, drawW, 3);
   });
   
-  // Spread row
-  if (bids.length > 0 && asks.length > 0) {
-    const spread = asks[asks.length - 1].price - bids[0].price;
-    html += `<div class="dom-row" style="background:#1a1a2e; height:24px;">
-      <div></div>
-      <div class="price-cell" style="color:#ffaa00; font-size:9px;">SPREAD: ${formatPrice(spread)}</div>
-      <div></div>
-    </div>`;
+  // Draw asks
+  Object.entries(S.orderBook.asks).forEach(([price, qty]) => {
+    const p = parseFloat(price);
+    if (p < low || p > high) return;
+    const y = ((high - p) / priceRange) * chartH;
+    const intensity = Math.min(qty / maxQty, 1);
+    const alpha = 0.05 + intensity * 0.2;
+    chartCtx.fillStyle = `rgba(255, 53, 71, ${alpha})`;
+    chartCtx.fillRect(0, y - 1, drawW, 3);
+  });
+}
+
+function renderChartEvents(drawW, high, low, priceRange, visible) {
+  if (visible.length === 0 || S.events.length === 0) return;
+  
+  const firstTime = visible[0].openTime;
+  const lastTime = visible[visible.length - 1].closeTime;
+  const timeRange = lastTime - firstTime || 1;
+  
+  S.events.forEach(ev => {
+    if (ev.time < firstTime || ev.time > lastTime) return;
+    if (!ev.price || ev.price < low || ev.price > high) return;
+    
+    const x = ((ev.time - firstTime) / timeRange) * drawW;
+    const y = ((high - ev.price) / priceRange) * chartH;
+    
+    switch (ev.type) {
+      case 'AGGRESSIVE_BUY':
+        chartCtx.font = '14px sans-serif';
+        chartCtx.fillStyle = '#00e676';
+        chartCtx.textAlign = 'center';
+        chartCtx.fillText('▲', x, y);
+        break;
+      case 'AGGRESSIVE_SELL':
+        chartCtx.font = '14px sans-serif';
+        chartCtx.fillStyle = '#ff1744';
+        chartCtx.textAlign = 'center';
+        chartCtx.fillText('▼', x, y);
+        break;
+      case 'ORDER_PULL':
+        chartCtx.fillStyle = '#ffab00';
+        chartCtx.beginPath();
+        chartCtx.arc(x, y, 4, 0, Math.PI * 2);
+        chartCtx.fill();
+        break;
+      case 'ORDER_STACK':
+        chartCtx.fillStyle = '#7c4dff';
+        chartCtx.fillRect(x - 3, y - 3, 6, 6);
+        break;
+      case 'ICEBERG':
+        chartCtx.fillStyle = '#00e5ff';
+        chartCtx.beginPath();
+        chartCtx.moveTo(x, y - 5);
+        chartCtx.lineTo(x + 5, y + 3);
+        chartCtx.lineTo(x - 5, y + 3);
+        chartCtx.closePath();
+        chartCtx.fill();
+        break;
+    }
+  });
+}
+
+function renderCrosshair(drawW, high, low, priceRange, visible, numCandles) {
+  const { x, y } = S.crosshair;
+  if (x > drawW || x < 0 || y < 0 || y > chartH) return;
+  
+  // Lines
+  chartCtx.setLineDash([3, 3]);
+  chartCtx.strokeStyle = 'rgba(255,255,255,0.3)';
+  chartCtx.lineWidth = 0.5;
+  
+  chartCtx.beginPath();
+  chartCtx.moveTo(x, 0);
+  chartCtx.lineTo(x, chartH);
+  chartCtx.stroke();
+  
+  chartCtx.beginPath();
+  chartCtx.moveTo(0, y);
+  chartCtx.lineTo(drawW, y);
+  chartCtx.stroke();
+  chartCtx.setLineDash([]);
+  
+  // Price at cursor
+  const price = high - (y / chartH) * priceRange;
+  chartCtx.fillStyle = '#444';
+  chartCtx.fillRect(drawW, y - 8, PRICE_AXIS_W, 16);
+  chartCtx.fillStyle = '#fff';
+  chartCtx.font = '9px Courier New';
+  chartCtx.textAlign = 'left';
+  chartCtx.fillText(formatPrice(price), drawW + 4, y + 3);
+  
+  // Candle info tooltip
+  const candleW = drawW / numCandles;
+  const candleIdx = Math.floor(x / candleW);
+  if (candleIdx >= 0 && candleIdx < visible.length) {
+    const c = visible[candleIdx];
+    const tooltip = document.getElementById('crosshairInfo');
+    tooltip.style.display = 'block';
+    tooltip.style.left = (x + 80) + 'px';
+    tooltip.style.top = (y + 60) + 'px';
+    const time = new Date(c.openTime).toLocaleString();
+    tooltip.innerHTML = `
+      <div style="color:#aaa">${time}</div>
+      <div>O: ${formatPrice(c.open)} H: ${formatPrice(c.high)}</div>
+      <div>L: ${formatPrice(c.low)} C: ${formatPrice(c.close)}</div>
+      <div style="color:#00c853">Vol: ${c.volume.toFixed(4)}</div>
+    `;
+  }
+}
+
+function renderWaiting() {
+  chartCtx.fillStyle = '#0a0a12';
+  chartCtx.fillRect(0, 0, chartW, chartH);
+  chartCtx.font = '14px Courier New';
+  chartCtx.fillStyle = '#00e5ff';
+  chartCtx.textAlign = 'center';
+  chartCtx.fillText('Connecting to live market data...', chartW / 2, chartH / 2 - 10);
+  chartCtx.font = '11px Courier New';
+  chartCtx.fillStyle = '#444';
+  chartCtx.fillText('Building candles - please wait 5-10 seconds', chartW / 2, chartH / 2 + 15);
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════
+// VOLUME CHART RENDERING
+// ═══════════════════════════════════════════════════════════════════
+function renderVolume() {
+  volCtx.clearRect(0, 0, volW, volH);
+  
+  if (S.candles.length < 1) return;
+  
+  const drawW = volW - PRICE_AXIS_W;
+  const numCandles = Math.floor(S.visibleCandles / S.zoom);
+  const startIdx = Math.max(0, S.candles.length - numCandles - S.offset);
+  const endIdx = Math.min(S.candles.length, startIdx + numCandles);
+  const visible = S.candles.slice(startIdx, endIdx);
+  
+  if (visible.length === 0) return;
+  
+  // Find max volume
+  let maxVol = 0;
+  visible.forEach(c => { if (c.volume > maxVol) maxVol = c.volume; });
+  if (maxVol === 0) return;
+  
+  const barW = drawW / numCandles;
+  const barBodyW = Math.max(1, barW * 0.7);
+  
+  // Background grid
+  volCtx.strokeStyle = 'rgba(40, 40, 60, 0.3)';
+  volCtx.lineWidth = 0.5;
+  for (let i = 1; i <= 3; i++) {
+    const y = (i / 4) * volH;
+    volCtx.beginPath();
+    volCtx.moveTo(0, y);
+    volCtx.lineTo(drawW, y);
+    volCtx.stroke();
   }
   
-  // Bids (bottom)
-  bids.forEach(level => {
-    const pct = (level.qty / maxQty) * 100;
-    html += `<div class="dom-row">
-      <div class="qty-bid">${level.qty.toFixed(4)}</div>
-      <div class="price-cell" style="color:#55ff55">${formatPrice(level.price)}</div>
-      <div class="qty-ask"></div>
-      <div class="bid-bar" style="width:${pct * 0.5}%"></div>
-    </div>`;
+  // Draw volume bars
+  visible.forEach((candle, i) => {
+    const x = i * barW + barW / 2;
+    const totalH = (candle.volume / maxVol) * (volH - 4);
+    const buyH = candle.buyVolume ? (candle.buyVolume / candle.volume) * totalH : 0;
+    const sellH = totalH - buyH;
+    
+    // Sell portion (top of bar)
+    if (sellH > 0) {
+      volCtx.fillStyle = 'rgba(239, 83, 80, 0.7)';
+      volCtx.fillRect(x - barBodyW / 2, volH - totalH, barBodyW, sellH);
+    }
+    
+    // Buy portion (bottom of bar)
+    if (buyH > 0) {
+      volCtx.fillStyle = 'rgba(38, 166, 154, 0.7)';
+      volCtx.fillRect(x - barBodyW / 2, volH - buyH, barBodyW, buyH);
+    }
   });
   
-  container.innerHTML = html;
+  // Volume axis label
+  volCtx.fillStyle = 'rgba(13, 13, 21, 0.95)';
+  volCtx.fillRect(drawW, 0, PRICE_AXIS_W, volH);
+  volCtx.strokeStyle = '#1a1a2e';
+  volCtx.beginPath();
+  volCtx.moveTo(drawW, 0);
+  volCtx.lineTo(drawW, volH);
+  volCtx.stroke();
+  
+  volCtx.font = '8px Courier New';
+  volCtx.fillStyle = '#555';
+  volCtx.textAlign = 'left';
+  volCtx.fillText(maxVol.toFixed(2), drawW + 4, 12);
+  volCtx.fillText('0', drawW + 4, volH - 4);
+  volCtx.fillText('VOL', drawW + 4, volH / 2 + 3);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DOM LADDER
+// ═══════════════════════════════════════════════════════════════════
+function renderDOM() {
+  const el = document.getElementById('domLadder');
+  if (!S.currentPrice || Object.keys(S.orderBook.bids).length === 0) return;
+  
+  const bids = Object.entries(S.orderBook.bids)
+    .map(([p, q]) => ({ price: +p, qty: q }))
+    .sort((a, b) => b.price - a.price).slice(0, 10);
+    
+  const asks = Object.entries(S.orderBook.asks)
+    .map(([p, q]) => ({ price: +p, qty: q }))
+    .sort((a, b) => a.price - b.price).slice(0, 10);
+  
+  const maxQ = Math.max(...bids.map(b => b.qty), ...asks.map(a => a.qty), 1);
+  
+  let html = '';
+  
+  // Asks reversed
+  [...asks].reverse().forEach(l => {
+    const pct = (l.qty / maxQ) * 50;
+    html += `<div class="dom-row"><div class="qty-bid"></div><div class="price-cell" style="color:#ef5350">${formatPrice(l.price)}</div><div class="qty-ask">${l.qty.toFixed(4)}</div><div class="ask-bar" style="width:${pct}%"></div></div>`;
+  });
+  
+  // Spread
+  if (bids.length && asks.length) {
+    const spread = asks[0].price - bids[0].price;
+    html += `<div class="dom-row spread-row"><div></div><div class="price-cell" style="color:#ffaa00;font-size:8px">⟷ ${formatPrice(spread)}</div><div></div></div>`;
+  }
+  
+  // Bids
+  bids.forEach(l => {
+    const pct = (l.qty / maxQ) * 50;
+    html += `<div class="dom-row"><div class="qty-bid">${l.qty.toFixed(4)}</div><div class="price-cell" style="color:#26a69a">${formatPrice(l.price)}</div><div class="qty-ask"></div><div class="bid-bar" style="width:${pct}%"></div></div>`;
+  });
+  
+  el.innerHTML = html;
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // EVENTS LOG
 // ═══════════════════════════════════════════════════════════════════
 function renderEvents() {
-  const container = document.getElementById('eventsLog');
-  const significantEvents = state.events
-    .filter(e => e.type !== 'MARKET_ORDER' && e.type !== 'RESTING_LIQUIDITY')
-    .slice(-30)
-    .reverse();
+  const el = document.getElementById('eventsLog');
+  const evs = S.events.filter(e => e.type !== 'MARKET_ORDER').slice(-40).reverse();
   
   let html = '';
-  significantEvents.forEach(event => {
-    let className = '';
-    let text = '';
-    const time = new Date(event.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  evs.forEach(ev => {
+    const t = new Date(ev.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    let cls = '', txt = '';
     
-    switch (event.type) {
+    switch (ev.type) {
       case 'AGGRESSIVE_BUY':
-        className = 'aggressive-buy';
-        text = `${time} 🟢 AGG BUY ${event.size.toFixed(4)} @ ${formatPrice(event.price)}`;
-        break;
+        cls = 'agg-buy'; txt = `${t} ▲ AGG BUY ${ev.size.toFixed(4)} @ ${formatPrice(ev.price)}`; break;
       case 'AGGRESSIVE_SELL':
-        className = 'aggressive-sell';
-        text = `${time} 🔴 AGG SELL ${event.size.toFixed(4)} @ ${formatPrice(event.price)}`;
-        break;
+        cls = 'agg-sell'; txt = `${t} ▼ AGG SELL ${ev.size.toFixed(4)} @ ${formatPrice(ev.price)}`; break;
       case 'ORDER_PULL':
-        className = 'order-pull';
-        text = `${time} ⚠️ ${event.side} PULLED @ ${formatPrice(event.price)}`;
-        break;
+        cls = 'pull'; txt = `${t} ⚠ ${ev.side} PULL @ ${formatPrice(ev.price)}`; break;
       case 'ORDER_STACK':
-        className = 'order-stack';
-        text = `${time} 🧱 ${event.side} STACKED @ ${formatPrice(event.price)}`;
-        break;
+        cls = 'stack'; txt = `${t} ■ ${ev.side} STACK @ ${formatPrice(ev.price)}`; break;
       case 'ICEBERG':
-        className = 'iceberg';
-        text = `${time} 🧊 ICEBERG ${event.side} @ ${formatPrice(event.price)} (${event.refillCount}x)`;
-        break;
+        cls = 'iceberg'; txt = `${t} ◆ ICE ${ev.side} @ ${formatPrice(ev.price)} (${ev.refillCount}x)`; break;
       default:
-        className = 'resting';
-        text = `${time} ${event.description || event.type}`;
+        txt = `${t} ${ev.type}`; break;
     }
     
-    html += `<div class="event-item ${className}">${text}</div>`;
+    html += `<div class="event-item ${cls}">${txt}</div>`;
   });
   
-  container.innerHTML = html;
+  el.innerHTML = html;
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// STATS PANEL
+// STATS & COUNTDOWN
 // ═══════════════════════════════════════════════════════════════════
 function renderStats() {
-  const bidVol = Object.values(state.orderBook.bids).reduce((a, b) => a + b, 0);
-  const askVol = Object.values(state.orderBook.asks).reduce((a, b) => a + b, 0);
+  const bidVol = Object.values(S.orderBook.bids).reduce((a, b) => a + b, 0);
+  const askVol = Object.values(S.orderBook.asks).reduce((a, b) => a + b, 0);
   
-  const recentBuys = state.trades.filter(t => t.isBuy && Date.now() - t.time < 10000);
-  const recentSells = state.trades.filter(t => !t.isBuy && Date.now() - t.time < 10000);
-  const buyPower = recentBuys.reduce((a, t) => a + t.qty, 0);
-  const sellPower = recentSells.reduce((a, t) => a + t.qty, 0);
+  const recentBuys = S.trades.filter(t => t.isBuy && Date.now() - t.time < 10000);
+  const recentSells = S.trades.filter(t => !t.isBuy && Date.now() - t.time < 10000);
+  const buyPwr = recentBuys.reduce((a, t) => a + t.qty, 0);
+  const sellPwr = recentSells.reduce((a, t) => a + t.qty, 0);
   
-  const bidPrices = Object.keys(state.orderBook.bids).map(Number);
-  const askPrices = Object.keys(state.orderBook.asks).map(Number);
-  const spread = bidPrices.length > 0 && askPrices.length > 0 
-    ? Math.min(...askPrices) - Math.max(...bidPrices) : 0;
+  const bidPs = Object.keys(S.orderBook.bids).map(Number);
+  const askPs = Object.keys(S.orderBook.asks).map(Number);
+  const spread = bidPs.length && askPs.length ? Math.min(...askPs) - Math.max(...bidPs) : 0;
   
-  const totalVol = bidVol + askVol;
-  const imbalance = totalVol > 0 ? ((bidVol - askVol) / totalVol * 100).toFixed(1) : 0;
+  const total = bidVol + askVol;
+  const imbal = total > 0 ? ((bidVol - askVol) / total * 100).toFixed(1) : '0';
   
-  document.getElementById('statBidVol').textContent = bidVol.toFixed(2);
-  document.getElementById('statAskVol').textContent = askVol.toFixed(2);
-  document.getElementById('statBuyPwr').textContent = buyPower.toFixed(3);
-  document.getElementById('statSellPwr').textContent = sellPower.toFixed(3);
-  document.getElementById('statSpread').textContent = formatPrice(spread);
+  document.getElementById('sBidVol').textContent = bidVol.toFixed(2);
+  document.getElementById('sAskVol').textContent = askVol.toFixed(2);
+  document.getElementById('sBuyPwr').textContent = buyPwr.toFixed(3);
+  document.getElementById('sSellPwr').textContent = sellPwr.toFixed(3);
+  document.getElementById('sSpread').textContent = formatPrice(spread);
   
-  const imbalEl = document.getElementById('statImbalance');
-  imbalEl.textContent = imbalance + '%';
-  imbalEl.style.color = imbalance > 0 ? '#00c853' : imbalance < 0 ? '#ff3547' : '#fff';
+  const imbalEl = document.getElementById('sImbal');
+  imbalEl.textContent = imbal + '%';
+  imbalEl.style.color = imbal > 0 ? '#00c853' : imbal < 0 ? '#ff3547' : '#888';
   
-  // Price display
-  document.getElementById('priceValue').textContent = formatPrice(state.currentPrice);
+  // Price
+  document.getElementById('priceValue').textContent = formatPrice(S.currentPrice);
+  document.getElementById('priceValue').style.color = 
+    S.candles.length > 1 && S.currentPrice >= S.candles[S.candles.length - 1].open ? '#26a69a' : '#ef5350';
   
-  // Updates per second
+  // Countdown
+  updateCountdown();
+  
+  // Status bar
   const now = Date.now();
-  if (now - state.lastCountReset > 1000) {
-    state.updatesPerSecond = state.updateCount;
-    state.updateCount = 0;
-    state.lastCountReset = now;
+  if (now - S.lastCountReset > 1000) {
+    S.ups = S.updateCount;
+    S.updateCount = 0;
+    S.lastCountReset = now;
   }
-  
-  document.getElementById('statusUpdates').textContent = `${state.updatesPerSecond} updates/s`;
-  document.getElementById('statusEvents').textContent = `${state.events.filter(e => e.type !== 'MARKET_ORDER').length} events`;
+  document.getElementById('sUpdates').textContent = S.ups + '/s';
+  document.getElementById('sCandles').textContent = S.candles.length + ' candles';
+  document.getElementById('sInstrument').textContent = 
+    S.instruments[S.currentInstrument]?.name || S.currentInstrument;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// INSTRUMENT BUTTONS
-// ═══════════════════════════════════════════════════════════════════
-function buildInstrumentButtons() {
-  const container = document.getElementById('instrumentButtons');
-  container.innerHTML = '';
+function updateCountdown() {
+  const tfMs = TF_MS[S.currentTimeframe] || 60000;
+  const now = Date.now();
+  const currentOpen = Math.floor(now / tfMs) * tfMs;
+  const nextClose = currentOpen + tfMs;
+  const remaining = nextClose - now;
   
-  Object.entries(state.instruments).forEach(([key, info]) => {
+  const hrs = Math.floor(remaining / 3600000);
+  const mins = Math.floor((remaining % 3600000) / 60000);
+  const secs = Math.floor((remaining % 60000) / 1000);
+  
+  let text = '';
+  if (hrs > 0) text = `${hrs}h ${mins}m ${secs}s`;
+  else if (mins > 0) text = `${mins}m ${secs}s`;
+  else text = `${secs}s`;
+  
+  document.getElementById('countdown').textContent = `Close: ${text}`;
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════
+// UI CONTROLS & INTERACTIONS
+// ═══════════════════════════════════════════════════════════════════
+function buildButtons() {
+  // Instruments
+  const instEl = document.getElementById('instrumentBtns');
+  instEl.innerHTML = '';
+  Object.entries(S.instruments).forEach(([key, info]) => {
     const btn = document.createElement('button');
-    btn.className = 'instrument-btn' + (key === state.currentInstrument ? ' active' : '');
+    btn.className = 'inst-btn' + (key === S.currentInstrument ? ' active' : '');
     btn.textContent = key;
     btn.title = info.name;
-    btn.onclick = () => switchInstrument(key);
-    container.appendChild(btn);
+    btn.dataset.val = key;
+    btn.onclick = () => {
+      send({ type: 'CHANGE_INSTRUMENT', instrument: key });
+      S.currentInstrument = key;
+      S.candles = [];
+      S.offset = 0;
+      setActiveBtn('.inst-btn', key);
+    };
+    instEl.appendChild(btn);
   });
   
-  document.getElementById('statusInstrument').textContent = 
-    state.instruments[state.currentInstrument]?.name || state.currentInstrument;
-}
-
-function switchInstrument(instrument) {
-  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: 'CHANGE_INSTRUMENT', instrument }));
-    state.currentInstrument = instrument;
-    state.domHistory = [];
-    state.events = [];
-    state.priceRange = 0;
-    state.priceCenter = 0;
-    setActiveInstrument(instrument);
-    document.getElementById('statusInstrument').textContent = 
-      state.instruments[instrument]?.name || instrument;
-  }
-}
-
-function setActiveInstrument(instrument) {
-  document.querySelectorAll('.instrument-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.textContent === instrument);
+  // Timeframes
+  const tfEl = document.getElementById('timeframeBtns');
+  tfEl.innerHTML = '';
+  S.timeframes.forEach(tf => {
+    const btn = document.createElement('button');
+    btn.className = 'tf-btn' + (tf === S.currentTimeframe ? ' active' : '');
+    btn.textContent = tf;
+    btn.dataset.val = tf;
+    btn.onclick = () => {
+      send({ type: 'CHANGE_TIMEFRAME', timeframe: tf });
+      S.currentTimeframe = tf;
+      S.offset = 0;
+      setActiveBtn('.tf-btn', tf);
+      document.getElementById('sTimeframe').textContent = tf;
+    };
+    tfEl.appendChild(btn);
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// UI HELPERS
-// ═══════════════════════════════════════════════════════════════════
-function formatPrice(price) {
-  if (price === 0 || price === undefined) return '--';
-  if (price > 1000) return price.toFixed(2);
-  if (price > 1) return price.toFixed(4);
-  return price.toFixed(6);
+function setActiveBtn(selector, value) {
+  document.querySelectorAll(selector).forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.val === value);
+  });
 }
 
-function updateConnectionStatus(connected) {
-  const dot = document.getElementById('connectionDot');
-  const text = document.getElementById('connectionStatus');
-  
-  if (connected) {
-    dot.classList.add('connected');
-    text.textContent = 'Live';
-  } else {
-    dot.classList.remove('connected');
-    text.textContent = 'Reconnecting...';
-  }
-}
+// Zoom controls
+document.getElementById('zoomIn').onclick = () => {
+  S.zoom = Math.min(S.zoom * 1.3, 8);
+};
+document.getElementById('zoomOut').onclick = () => {
+  S.zoom = Math.max(S.zoom / 1.3, 0.3);
+};
+document.getElementById('zoomReset').onclick = () => {
+  S.zoom = 1;
+  S.offset = 0;
+};
 
-// ═══════════════════════════════════════════════════════════════════
-// ZOOM CONTROLS (mouse wheel)
-// ═══════════════════════════════════════════════════════════════════
-canvas.addEventListener('wheel', (e) => {
+// Mouse wheel zoom on chart
+chartCanvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   if (e.deltaY < 0) {
-    state.zoomLevel = Math.min(state.zoomLevel * 1.1, 10);
+    S.zoom = Math.min(S.zoom * 1.1, 8);
   } else {
-    state.zoomLevel = Math.max(state.zoomLevel / 1.1, 0.3);
+    S.zoom = Math.max(S.zoom / 1.1, 0.3);
   }
 });
 
+// Drag to scroll
+chartCanvas.addEventListener('mousedown', (e) => {
+  S.dragging = true;
+  S.dragStartX = e.clientX;
+  S.dragStartOffset = S.offset;
+  chartCanvas.style.cursor = 'grabbing';
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (S.dragging) {
+    const dx = e.clientX - S.dragStartX;
+    const candleW = (chartW - PRICE_AXIS_W) / Math.floor(S.visibleCandles / S.zoom);
+    const candleShift = Math.round(dx / candleW);
+    S.offset = Math.max(0, S.dragStartOffset + candleShift);
+    S.offset = Math.min(S.offset, Math.max(0, S.candles.length - 10));
+  }
+  
+  // Crosshair
+  const rect = chartCanvas.getBoundingClientRect();
+  if (e.clientX >= rect.left && e.clientX <= rect.right && 
+      e.clientY >= rect.top && e.clientY <= rect.bottom) {
+    S.crosshair = {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  } else {
+    S.crosshair = null;
+    document.getElementById('crosshairInfo').style.display = 'none';
+  }
+});
+
+window.addEventListener('mouseup', () => {
+  S.dragging = false;
+  chartCanvas.style.cursor = 'crosshair';
+});
+
+chartCanvas.style.cursor = 'crosshair';
+
 // ═══════════════════════════════════════════════════════════════════
-// MAIN RENDER LOOP
+// HELPERS
 // ═══════════════════════════════════════════════════════════════════
-function mainLoop() {
-  renderHeatmap();
-  renderDOMLadder();
+function formatPrice(p) {
+  if (!p || p === 0) return '--';
+  if (p > 1000) return p.toFixed(2);
+  if (p > 1) return p.toFixed(4);
+  return p.toFixed(6);
+}
+
+function setConnectionUI(on) {
+  document.getElementById('connDot').classList.toggle('on', on);
+  document.getElementById('connText').textContent = on ? 'Live' : 'Reconnecting...';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// MAIN LOOP
+// ═══════════════════════════════════════════════════════════════════
+function loop() {
+  renderChart();
+  renderVolume();
+  renderDOM();
   renderEvents();
   renderStats();
-  requestAnimationFrame(mainLoop);
+  requestAnimationFrame(loop);
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════════════════════
 connect();
-mainLoop();
+loop();
 
-console.log('%c FREE BOOKMAP HEATMAP ', 'background: #00e5ff; color: #000; font-size: 14px; font-weight: bold;');
-console.log('%c Connected to live market data - No subscription needed! ', 'color: #00e676;');
+console.log('%c BOOKMAP PRO ', 'background:#00e5ff;color:#000;font-size:14px;font-weight:bold');
+console.log('%c Free Candlestick + Heatmap + Order Flow ', 'color:#00e676');
