@@ -124,6 +124,10 @@ function render() {
   const chartH = H - volH;
   
   // Visible candle count based on zoom
+  // Leave 15% empty space on right so latest candle is clearly visible
+  const rightPad = drawW * 0.12;
+  const chartDrawW = drawW - rightPad;
+  
   const baseCandles = 80;
   const numVis = Math.max(10, Math.round(baseCandles / S.zoom));
   const scrollOffset = Math.round(S.scrollX);
@@ -145,7 +149,7 @@ function render() {
   const tEnd = visible[visible.length-1].closeTime;
   const tRange = tEnd - tStart || 1;
   
-  const candleW = drawW / visible.length;
+  const candleW = chartDrawW / visible.length;
   const bodyW = Math.max(1, candleW * 0.65);
   
   // ─── Background ───
@@ -163,8 +167,9 @@ function render() {
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, chartH); ctx.stroke();
   }
   
-  // ─── 1. LIQUIDITY HEATMAP (behind candles) ───
-  // Draw from domHistory - each snapshot = vertical strip of colored bands
+  // ─── 1. LIQUIDITY HEATMAP (FULL BACKGROUND behind all candles) ───
+  // Each DOM snapshot = one vertical column of colored bands
+  // They should span the ENTIRE chart width
   let maxQ = 0;
   S.domHistory.forEach(snap => {
     Object.values(snap.bids).forEach(q => { if (q > maxQ) maxQ = q; });
@@ -172,45 +177,66 @@ function render() {
   });
   if (maxQ === 0) maxQ = 1;
   
-  const visibleSnaps = S.domHistory.filter(s => s.time >= tStart && s.time <= tEnd);
+  // Get snapshots that overlap with our time range
+  const visibleSnaps = S.domHistory.filter(s => s.time >= tStart - tRange*0.1 && s.time <= tEnd + tRange*0.1);
   
-  visibleSnaps.forEach((snap, idx) => {
-    const x = ((snap.time - tStart) / tRange) * drawW;
-    const nextSnap = visibleSnaps[idx + 1];
-    const colW = nextSnap ? Math.max(2, ((nextSnap.time - snap.time) / tRange) * drawW) : candleW;
+  if (visibleSnaps.length > 0) {
+    // If we have few snapshots, spread them across the FULL width
+    // This ensures the heatmap covers the whole background
+    const snapSpacing = chartDrawW / Math.max(1, visibleSnaps.length);
     
-    // Bids (support below price)
-    Object.entries(snap.bids).forEach(([p, q]) => {
-      const price = +p;
-      if (price < lo || price > hi) return;
-      const y = ((hi - price) / range) * chartH;
-      const intensity = Math.min(q / maxQ, 1);
-      ctx.fillStyle = heatColor(intensity);
-      const bandH = Math.max(2, (range * 0.002 / range) * chartH + intensity * 4);
-      ctx.fillRect(x, y - bandH/2, colW + 0.5, bandH);
+    visibleSnaps.forEach((snap, idx) => {
+      // Map snapshot to chart X position
+      let x;
+      if (visibleSnaps.length < 10) {
+        // Few snapshots: spread evenly across entire width
+        x = idx * snapSpacing;
+      } else {
+        // Many snapshots: map by time
+        x = ((snap.time - tStart) / tRange) * chartDrawW;
+      }
+      
+      if (x < -20 || x > chartDrawW + 20) return;
+      
+      // Column width — fill gap to next snapshot
+      const colW = Math.max(3, snapSpacing);
+      
+      // Draw ALL bid levels (support zones)
+      Object.entries(snap.bids).forEach(([p, q]) => {
+        const price = +p;
+        if (price < lo || price > hi) return;
+        const y = ((hi - price) / range) * chartH;
+        const intensity = Math.min(q / maxQ, 1);
+        ctx.fillStyle = heatColor(intensity);
+        // Band thickness grows with intensity
+        const bandH = Math.max(2, 2 + intensity * 5);
+        ctx.fillRect(x, y - bandH/2, colW + 1, bandH);
+      });
+      
+      // Draw ALL ask levels (resistance zones)
+      Object.entries(snap.asks).forEach(([p, q]) => {
+        const price = +p;
+        if (price < lo || price > hi) return;
+        const y = ((hi - price) / range) * chartH;
+        const intensity = Math.min(q / maxQ, 1);
+        ctx.fillStyle = heatColor(intensity);
+        const bandH = Math.max(2, 2 + intensity * 5);
+        ctx.fillRect(x, y - bandH/2, colW + 1, bandH);
+      });
     });
-    
-    // Asks (resistance above price)
-    Object.entries(snap.asks).forEach(([p, q]) => {
-      const price = +p;
-      if (price < lo || price > hi) return;
-      const y = ((hi - price) / range) * chartH;
-      const intensity = Math.min(q / maxQ, 1);
-      ctx.fillStyle = heatColor(intensity);
-      const bandH = Math.max(2, (range * 0.002 / range) * chartH + intensity * 4);
-      ctx.fillRect(x, y - bandH/2, colW + 0.5, bandH);
-    });
-  });
+  }
   
-  // Also draw CURRENT order book as heatmap on the right edge
+  // Also paint current order book across the RIGHT HALF as a live overlay
+  // This shows where liquidity sits RIGHT NOW
   Object.entries(S.orderBook.bids).forEach(([p, q]) => {
     const price = +p;
     if (price < lo || price > hi) return;
     const y = ((hi - price) / range) * chartH;
     const intensity = Math.min(q / maxQ, 1);
     ctx.fillStyle = heatColor(intensity);
-    const bandH = Math.max(3, intensity * 6);
-    ctx.fillRect(drawW * 0.7, y - bandH/2, drawW * 0.3, bandH);
+    const bandH = Math.max(3, 2 + intensity * 6);
+    // Draw from middle to right edge (live liquidity)
+    ctx.fillRect(chartDrawW * 0.5, y - bandH/2, chartDrawW * 0.5 + rightPad, bandH);
   });
   Object.entries(S.orderBook.asks).forEach(([p, q]) => {
     const price = +p;
@@ -218,8 +244,8 @@ function render() {
     const y = ((hi - price) / range) * chartH;
     const intensity = Math.min(q / maxQ, 1);
     ctx.fillStyle = heatColor(intensity);
-    const bandH = Math.max(3, intensity * 6);
-    ctx.fillRect(drawW * 0.7, y - bandH/2, drawW * 0.3, bandH);
+    const bandH = Math.max(3, 2 + intensity * 6);
+    ctx.fillRect(chartDrawW * 0.5, y - bandH/2, chartDrawW * 0.5 + rightPad, bandH);
   });
   
   // ─── 2. CANDLESTICKS (on top of heatmap) ───
@@ -257,7 +283,7 @@ function render() {
       if (t.time < tStart || t.time > tEnd) return;
       if (t.price < lo || t.price > hi) return;
       
-      const x = ((t.time - tStart) / tRange) * drawW;
+      const x = ((t.time - tStart) / tRange) * chartDrawW;
       const y = ((hi - t.price) / range) * chartH;
       const rel = Math.min(t.qty / (avgQ || 1), 8);
       const r = Math.max(2, Math.min(12, rel * 2));
@@ -294,14 +320,14 @@ function render() {
       const y = ((hi - bestBid) / range) * chartH;
       ctx.setLineDash([2, 2]);
       ctx.strokeStyle = 'rgba(63, 185, 80, 0.6)'; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(drawW * 0.5, y); ctx.lineTo(drawW, y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(drawW, y); ctx.stroke();
       ctx.setLineDash([]);
     }
     if (bestAsk > lo && bestAsk < hi) {
       const y = ((hi - bestAsk) / range) * chartH;
       ctx.setLineDash([2, 2]);
       ctx.strokeStyle = 'rgba(248, 81, 73, 0.6)'; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(drawW * 0.5, y); ctx.lineTo(drawW, y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(drawW, y); ctx.stroke();
       ctx.setLineDash([]);
     }
   }
@@ -540,7 +566,7 @@ canvas.addEventListener('mousemove', (e) => {
   S.mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
   if (S.dragging) {
     const dx = e.clientX - S.dragStartX;
-    const pxPerCandle = (W - AXIS_W) / Math.round(80 / S.targetZoom);
+    const pxPerCandle = (W - AXIS_W) * 0.88 / Math.round(80 / S.targetZoom);
     const candleShift = dx / pxPerCandle;
     S.targetScrollX = Math.max(0, Math.min(S.candles.length - 20, S.dragStartScroll + candleShift));
   }
