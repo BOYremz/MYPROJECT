@@ -5,9 +5,17 @@ const path = require('path');
 const crypto = require('crypto');
 
 // ============================================================
-// BOOKMAP CLONE - LIVE XAUUSD via Binance PAXG/USDT
-// Zero dependencies - uses Node.js built-in modules only
+// BOOKMAP CLONE - LIVE MARKET DATA
+// Requires Node.js v22+ (uses built-in WebSocket)
+// Zero npm dependencies
 // ============================================================
+
+const nodeVersion = parseInt(process.versions.node.split('.')[0]);
+if (nodeVersion < 21) {
+  console.error(`\n  ERROR: Node.js v22+ required (you have v${process.versions.node})`);
+  console.error(`  Built-in WebSocket is needed for Binance connection.\n`);
+  process.exit(1);
+}
 
 const PORT = 3000;
 
@@ -218,22 +226,26 @@ let pendingTrades = [];
 let lastBookBroadcast = 0;
 
 // ============================================================
-// Connect to Binance Depth Stream (Order Book)
+// Connect to Binance using Node.js built-in WebSocket
 // ============================================================
 function connectDepthStream() {
   const symbol = activeBinanceSymbol;
   const url = `wss://stream.binance.com:9443/ws/${symbol}@depth20@100ms`;
   
-  console.log(`[WS] Connecting to Binance depth stream: ${symbol}...`);
+  console.log(`[WS] Connecting depth: ${symbol}...`);
   
-  activeDepthSocket = createWebSocketClient(url, {
-    onOpen: () => {
-      console.log(`[WS] Depth stream connected (${symbol})`);
+  try {
+    const ws = new WebSocket(url);
+    activeDepthSocket = ws;
+    
+    ws.addEventListener('open', () => {
+      console.log(`[WS] Depth connected (${symbol})`);
       binanceConnected = true;
-    },
-    onMessage: (data) => {
+    });
+    
+    ws.addEventListener('message', (event) => {
       try {
-        const msg = JSON.parse(data);
+        const msg = JSON.parse(event.data);
         if (msg.bids && msg.asks) {
           orderBook.bids = {};
           orderBook.asks = {};
@@ -250,7 +262,6 @@ function connectDepthStream() {
             if (q > 0) orderBook.asks[p.toFixed(2)] = q;
           });
           
-          // Calculate mid price
           const bidPrices = Object.keys(orderBook.bids).map(Number);
           const askPrices = Object.keys(orderBook.asks).map(Number);
           if (bidPrices.length && askPrices.length) {
@@ -265,34 +276,40 @@ function connectDepthStream() {
           }
         }
       } catch (e) { /* ignore */ }
-    },
-    onClose: () => {
-      console.log('[WS] Depth stream disconnected, reconnecting...');
+    });
+    
+    ws.addEventListener('close', () => {
+      console.log('[WS] Depth disconnected, reconnecting...');
       binanceConnected = false;
       setTimeout(connectDepthStream, 3000);
-    },
-    onError: (err) => {
-      console.log('[WS] Depth stream error:', err.message || 'unknown');
-    }
-  });
+    });
+    
+    ws.addEventListener('error', (err) => {
+      console.log('[WS] Depth error');
+    });
+  } catch (e) {
+    console.log('[WS] Depth connection failed:', e.message);
+    setTimeout(connectDepthStream, 5000);
+  }
 }
 
-// ============================================================
-// Connect to Binance Trade Stream (Executed Trades)
-// ============================================================
 function connectTradeStream() {
   const symbol = activeBinanceSymbol;
   const url = `wss://stream.binance.com:9443/ws/${symbol}@aggTrade`;
   
-  console.log(`[WS] Connecting to Binance trade stream: ${symbol}...`);
+  console.log(`[WS] Connecting trades: ${symbol}...`);
   
-  activeTradeSocket = createWebSocketClient(url, {
-    onOpen: () => {
-      console.log(`[WS] Trade stream connected (${symbol})`);
-    },
-    onMessage: (data) => {
+  try {
+    const ws = new WebSocket(url);
+    activeTradeSocket = ws;
+    
+    ws.addEventListener('open', () => {
+      console.log(`[WS] Trades connected (${symbol})`);
+    });
+    
+    ws.addEventListener('message', (event) => {
       try {
-        const msg = JSON.parse(data);
+        const msg = JSON.parse(event.data);
         const price = parseFloat(msg.p);
         const qty = parseFloat(msg.q);
         const isBuy = !msg.m;
@@ -317,15 +334,20 @@ function connectTradeStream() {
           timestamp: timestamp
         });
       } catch (e) { /* ignore */ }
-    },
-    onClose: () => {
-      console.log('[WS] Trade stream disconnected, reconnecting...');
+    });
+    
+    ws.addEventListener('close', () => {
+      console.log('[WS] Trades disconnected, reconnecting...');
       setTimeout(connectTradeStream, 3000);
-    },
-    onError: (err) => {
-      console.log('[WS] Trade stream error:', err.message || 'unknown');
-    }
-  });
+    });
+    
+    ws.addEventListener('error', (err) => {
+      console.log('[WS] Trades error');
+    });
+  } catch (e) {
+    console.log('[WS] Trade connection failed:', e.message);
+    setTimeout(connectTradeStream, 5000);
+  }
 }
 
 // ============================================================
@@ -336,6 +358,10 @@ function switchInstrument(symbol) {
   if (symbol === activeSymbol) return;
   
   console.log(`[SWITCH] Changing to ${symbol} (${INSTRUMENTS[symbol].binance})`);
+  
+  // Close existing connections
+  if (activeDepthSocket) { try { activeDepthSocket.close(); } catch(e){} }
+  if (activeTradeSocket) { try { activeTradeSocket.close(); } catch(e){} }
   
   activeSymbol = symbol;
   activeBinanceSymbol = INSTRUMENTS[symbol].binance;
@@ -351,11 +377,11 @@ function switchInstrument(symbol) {
   pendingTrades = [];
   binanceConnected = false;
   
-  // Reconnect streams (old ones will auto-close and not reconnect
-  // because activeBinanceSymbol changed)
-  connectDepthStream();
-  connectTradeStream();
-  restFallback();
+  // Reconnect streams
+  setTimeout(() => {
+    connectDepthStream();
+    connectTradeStream();
+  }, 500);
   
   // Notify clients
   broadcast({
@@ -364,140 +390,6 @@ function switchInstrument(symbol) {
     name: INSTRUMENTS[symbol].name,
     tickSize: INSTRUMENTS[symbol].tickSize
   });
-}
-
-// ============================================================
-// Simple WebSocket Client (Node.js built-in)
-// ============================================================
-function createWebSocketClient(url, handlers) {
-  const { URL } = require('url');
-  const parsedUrl = new URL(url);
-  const isSecure = parsedUrl.protocol === 'wss:';
-  const port = parsedUrl.port || (isSecure ? 443 : 80);
-  const wsKey = crypto.randomBytes(16).toString('base64');
-  
-  const options = {
-    hostname: parsedUrl.hostname,
-    port: port,
-    path: parsedUrl.pathname + parsedUrl.search,
-    headers: {
-      'Upgrade': 'websocket',
-      'Connection': 'Upgrade',
-      'Sec-WebSocket-Key': wsKey,
-      'Sec-WebSocket-Version': '13',
-      'Host': parsedUrl.host
-    },
-    rejectUnauthorized: false
-  };
-
-  const req = (isSecure ? https : http).request(options);
-  
-  req.on('upgrade', (res, socket, head) => {
-    let dataBuffer = Buffer.alloc(0);
-    
-    if (handlers.onOpen) handlers.onOpen();
-    
-    socket.on('data', (chunk) => {
-      dataBuffer = Buffer.concat([dataBuffer, chunk]);
-      
-      // Process all complete frames in buffer
-      while (dataBuffer.length >= 2) {
-        const frame = parseWSFrame(dataBuffer);
-        if (!frame) break;
-        
-        dataBuffer = dataBuffer.slice(frame.totalLength);
-        
-        if (frame.opcode === 0x1) { // text
-          if (handlers.onMessage) handlers.onMessage(frame.payload);
-        } else if (frame.opcode === 0x8) { // close
-          socket.end();
-          if (handlers.onClose) handlers.onClose();
-          return;
-        } else if (frame.opcode === 0x9) { // ping
-          // Send pong
-          const pong = Buffer.alloc(2);
-          pong[0] = 0x8A; // FIN + pong
-          pong[1] = 0;
-          socket.write(pong);
-        }
-      }
-    });
-    
-    socket.on('close', () => {
-      if (handlers.onClose) handlers.onClose();
-    });
-    
-    socket.on('error', (err) => {
-      if (handlers.onError) handlers.onError(err);
-    });
-    
-    // Send ping every 2 minutes to keep alive
-    const pingInterval = setInterval(() => {
-      try {
-        const ping = Buffer.alloc(2);
-        ping[0] = 0x89; // FIN + ping
-        ping[1] = 0;
-        socket.write(ping);
-      } catch (e) {
-        clearInterval(pingInterval);
-      }
-    }, 120000);
-    
-    socket.on('close', () => clearInterval(pingInterval));
-  });
-  
-  req.on('error', (err) => {
-    if (handlers.onError) handlers.onError(err);
-    setTimeout(() => {
-      if (handlers.onClose) handlers.onClose();
-    }, 1000);
-  });
-  
-  req.end();
-  return req;
-}
-
-function parseWSFrame(buffer) {
-  if (buffer.length < 2) return null;
-  
-  const firstByte = buffer[0];
-  const secondByte = buffer[1];
-  const opcode = firstByte & 0x0F;
-  const masked = (secondByte & 0x80) !== 0;
-  let payloadLength = secondByte & 0x7F;
-  let offset = 2;
-  
-  if (payloadLength === 126) {
-    if (buffer.length < 4) return null;
-    payloadLength = buffer.readUInt16BE(2);
-    offset = 4;
-  } else if (payloadLength === 127) {
-    if (buffer.length < 10) return null;
-    payloadLength = Number(buffer.readBigUInt64BE(2));
-    offset = 10;
-  }
-  
-  if (masked) {
-    offset += 4; // skip mask
-  }
-  
-  const totalLength = offset + payloadLength;
-  if (buffer.length < totalLength) return null;
-  
-  let payload = buffer.slice(offset, totalLength);
-  
-  if (masked) {
-    const mask = buffer.slice(offset - 4, offset);
-    for (let i = 0; i < payload.length; i++) {
-      payload[i] ^= mask[i % 4];
-    }
-  }
-  
-  return {
-    opcode,
-    payload: payload.toString('utf8'),
-    totalLength
-  };
 }
 
 // ============================================================
@@ -521,8 +413,8 @@ setInterval(() => {
     .sort((a, b) => a[0] - b[0])
     .slice(0, 30);
   
-  const bestBid = bidEntries.length ? bidEntries[0][0] : currentPrice - TICK_SIZE;
-  const bestAsk = askEntries.length ? askEntries[0][0] : currentPrice + TICK_SIZE;
+  const bestBid = bidEntries.length ? bidEntries[0][0] : currentPrice - 0.01;
+  const bestAsk = askEntries.length ? askEntries[0][0] : currentPrice + 0.01;
   
   events.push({
     type: 'book',
@@ -645,7 +537,4 @@ server.listen(PORT, () => {
   
   // Initial REST load
   restFallback();
-  
-  // Send instruments list to new clients
-  const originalBroadcast = broadcast;
 });
