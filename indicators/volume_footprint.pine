@@ -1,0 +1,210 @@
+// This Pine Script(R) v5 indicator source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// Volume Footprint Indicator
+// Shows buy vs sell pressure at each price level within each bar
+// Works on any market (Gold, Forex, Crypto, Stocks, Indices)
+
+//@version=5
+indicator("Volume Footprint", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+i_levels       = input.int(10, "Price Levels per Bar", minval=3, maxval=30, tooltip="Number of price levels to divide each candle into")
+i_barWidth     = input.float(0.4, "Bar Width (0.1-0.9)", minval=0.1, maxval=0.9, step=0.05, tooltip="Width of footprint bars relative to candle spacing")
+i_showDelta    = input.bool(true, "Show Delta Labels", tooltip="Show net buy-sell delta below each bar")
+i_showImbal    = input.bool(true, "Show Imbalance Dots", tooltip="Highlight levels where buy/sell imbalance > threshold")
+i_imbalThresh  = input.float(300, "Imbalance Threshold %", minval=100, maxval=1000, step=50, tooltip="% difference to highlight as imbalance (e.g. 300 = 3x)")
+i_buyColor     = input.color(color.new(#26a69a, 20), "Buy Color")
+i_sellColor    = input.color(color.new(#ef5350, 20), "Sell Color")
+i_deltaUp      = input.color(color.new(#00e676, 0), "Delta Positive")
+i_deltaDn      = input.color(color.new(#ff5252, 0), "Delta Negative")
+i_imbalBuy     = input.color(color.new(#00ff88, 0), "Buy Imbalance Dot")
+i_imbalSell    = input.color(color.new(#ff4466, 0), "Sell Imbalance Dot")
+i_lookback     = input.int(50, "Bars to Display", minval=10, maxval=200, tooltip="How many recent bars to show footprint on")
+i_textSize     = input.string("tiny", "Label Size", options=["tiny", "small", "normal"])
+
+// ═══════════════════════════════════════════════════════════════
+// VOLUME ESTIMATION
+// Since TradingView doesn't provide tick-by-tick data,
+// we estimate buy/sell distribution using price action within the bar
+// ═══════════════════════════════════════════════════════════════
+
+// Estimate buy volume vs sell volume for the whole bar
+// Method: Use close position within the bar (similar to how Binance taker buy volume works)
+buyRatio = (close - low) / math.max(high - low, syminfo.mintick)
+buyRatio := math.max(0.05, math.min(0.95, buyRatio))  // Clamp
+
+totalVol   = volume
+buyVol     = totalVol * buyRatio
+sellVol    = totalVol * (1 - buyRatio)
+
+// ═══════════════════════════════════════════════════════════════
+// FOOTPRINT DISTRIBUTION
+// Distribute volume across price levels with realistic clustering
+// More volume near open/close, less at wicks
+// ═══════════════════════════════════════════════════════════════
+
+// Get text size
+labelSize = switch i_textSize
+    "tiny"   => size.tiny
+    "small"  => size.small
+    "normal" => size.normal
+
+// Calculate bar spacing for width reference
+barSpacing = ta.atr(10) * i_barWidth * 0.1
+
+// Only render on recent bars to avoid performance issues
+if bar_index >= (last_bar_index - i_lookback)
+    // Determine price levels
+    float range_size = high - low
+    
+    if range_size > 0 and totalVol > 0
+        float levelHeight = range_size / i_levels
+        
+        // Find max volume for normalization across levels
+        float maxLevelVol = 0
+        
+        // First pass: calculate volumes per level
+        array<float> buyVols = array.new_float(i_levels, 0.0)
+        array<float> sellVols = array.new_float(i_levels, 0.0)
+        
+        float totalWeight = 0.0
+        array<float> weights = array.new_float(i_levels, 0.0)
+        
+        for i = 0 to i_levels - 1
+            float levelMid = low + (i + 0.5) * levelHeight
+            // Bell curve distribution centered around close price
+            float distFromClose = math.abs(levelMid - close) / range_size
+            float w = math.exp(-distFromClose * 2.5) + 0.15
+            array.set(weights, i, w)
+            totalWeight += w
+        
+        // Distribute volume based on weights
+        for i = 0 to i_levels - 1
+            float w = array.get(weights, i)
+            float ratio = w / totalWeight
+            float levelVol = totalVol * ratio
+            
+            // Determine buy/sell split per level
+            // Lower levels have more buying (support), upper levels more selling (resistance)
+            float posInRange = (i + 0.5) / i_levels
+            float levelBuyRatio = 0.0
+            
+            if close >= open  // Bullish bar
+                levelBuyRatio := 0.65 - posInRange * 0.35
+            else  // Bearish bar
+                levelBuyRatio := 0.35 + posInRange * 0.35
+                levelBuyRatio := 1.0 - levelBuyRatio
+            
+            levelBuyRatio := math.max(0.1, math.min(0.9, levelBuyRatio))
+            
+            float lBuy = levelVol * levelBuyRatio
+            float lSell = levelVol * (1 - levelBuyRatio)
+            
+            array.set(buyVols, i, lBuy)
+            array.set(sellVols, i, lSell)
+            
+            if levelVol > maxLevelVol
+                maxLevelVol := levelVol
+        
+        // Second pass: draw boxes
+        if maxLevelVol > 0
+            for i = 0 to i_levels - 1
+                float levelLow = low + i * levelHeight
+                float levelHigh = levelLow + levelHeight
+                float levelMid = (levelLow + levelHigh) / 2
+                float lBuy = array.get(buyVols, i)
+                float lSell = array.get(sellVols, i)
+                float lTotal = lBuy + lSell
+                
+                if lTotal > maxLevelVol * 0.05  // Skip tiny levels
+                    // Buy bar - extends LEFT from candle center
+                    float buyWidth = (lBuy / maxLevelVol) * barSpacing
+                    if buyWidth > syminfo.mintick
+                        box.new(
+                             bar_index, levelHigh,
+                             bar_index, levelLow,
+                             border_color=color.new(i_buyColor, 60),
+                             bgcolor=color.new(i_buyColor, 100 - math.round((lBuy / maxLevelVol) * 70)),
+                             border_width=1)
+                    
+                    // Sell bar - extends RIGHT from candle center
+                    if lSell / maxLevelVol > 0.05
+                        // We use border style to indicate sell pressure
+                        box.new(
+                             bar_index, levelHigh,
+                             bar_index, levelLow,
+                             border_color=color.new(i_sellColor, 60),
+                             bgcolor=color.new(i_sellColor, 100 - math.round((lSell / maxLevelVol) * 70)),
+                             border_width=1,
+                             border_style=line.style_dotted)
+                    
+                    // Imbalance detection
+                    if i_showImbal and lTotal > maxLevelVol * 0.2
+                        float imbalRatio = math.max(lBuy, lSell) / math.max(math.min(lBuy, lSell), 0.001)
+                        if imbalRatio > (i_imbalThresh / 100)
+                            color dotColor = lBuy > lSell ? i_imbalBuy : i_imbalSell
+                            label.new(
+                                 bar_index, levelMid,
+                                 text="*",
+                                 style=label.style_none,
+                                 textcolor=dotColor,
+                                 size=size.small)
+        
+        // Delta label below the bar
+        if i_showDelta
+            float delta = buyVol - sellVol
+            string deltaStr = ""
+            if math.abs(delta) >= 1000000
+                deltaStr := str.tostring(delta / 1000000, "#.#") + "M"
+            else if math.abs(delta) >= 1000
+                deltaStr := str.tostring(delta / 1000, "#.#") + "K"
+            else
+                deltaStr := str.tostring(delta, "#.##")
+            
+            if delta >= 0
+                deltaStr := "+" + deltaStr
+            
+            color deltaColor = delta >= 0 ? i_deltaUp : i_deltaDn
+            label.new(
+                 bar_index, low - levelHeight * 0.5,
+                 text=deltaStr,
+                 style=label.style_none,
+                 textcolor=deltaColor,
+                 size=labelSize)
+
+// ═══════════════════════════════════════════════════════════════
+// CUMULATIVE VOLUME DELTA (CVD) - Background reference
+// ═══════════════════════════════════════════════════════════════
+var float cvd = 0.0
+cvd += buyVol - sellVol
+
+// Plot CVD as a subtle reference (can be turned off)
+i_showCVD = input.bool(false, "Show CVD Line", group="Extras")
+plot(i_showCVD ? cvd : na, "CVD", color=color.new(#7c4dff, 50), display=display.pane)
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE - Shows current bar's footprint summary
+// ═══════════════════════════════════════════════════════════════
+i_showTable = input.bool(true, "Show Info Table", group="Extras")
+
+if barstate.islast and i_showTable
+    var table t = table.new(position.top_right, 2, 5, bgcolor=color.new(#161b22, 10), border_width=1, border_color=color.new(#30363d, 20))
+    
+    table.cell(t, 0, 0, "FOOTPRINT", text_color=#00d4ff, text_size=size.small)
+    table.cell(t, 1, 0, "", text_size=size.small)
+    
+    table.cell(t, 0, 1, "Buy Vol", text_color=#8b949e, text_size=size.tiny)
+    table.cell(t, 1, 1, str.tostring(buyVol, "#.##"), text_color=#3fb950, text_size=size.tiny)
+    
+    table.cell(t, 0, 2, "Sell Vol", text_color=#8b949e, text_size=size.tiny)
+    table.cell(t, 1, 2, str.tostring(sellVol, "#.##"), text_color=#f85149, text_size=size.tiny)
+    
+    float delta = buyVol - sellVol
+    table.cell(t, 0, 3, "Delta", text_color=#8b949e, text_size=size.tiny)
+    table.cell(t, 1, 3, (delta >= 0 ? "+" : "") + str.tostring(delta, "#.##"), text_color=delta >= 0 ? #3fb950 : #f85149, text_size=size.tiny)
+    
+    float pctBuy = totalVol > 0 ? (buyVol / totalVol) * 100 : 50
+    table.cell(t, 0, 4, "Buy %", text_color=#8b949e, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(pctBuy, "#.#") + "%", text_color=pctBuy > 50 ? #3fb950 : #f85149, text_size=size.tiny)
