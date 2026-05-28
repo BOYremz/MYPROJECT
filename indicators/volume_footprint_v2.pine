@@ -1,6 +1,6 @@
 // This Pine Script(R) v5 indicator source code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
-// Volume Footprint V2 - Simplified & Clean
+// Volume Footprint V2 - BIG & VISIBLE
 // Paste this directly into TradingView Pine Editor
 // Works on ANY market: Gold (XAUUSD), Forex, Crypto, Stocks, Indices
 
@@ -11,23 +11,25 @@ indicator("Volume Footprint V2", shorttitle="VFP", overlay=true, max_boxes_count
 // SETTINGS
 // ═══════════════════════════════════════════════════════════════
 grp1 = "Footprint Settings"
-i_levels       = input.int(8, "Price Levels", minval=3, maxval=20, group=grp1, tooltip="Number of price rows per candle")
+i_levels       = input.int(5, "Price Levels", minval=3, maxval=20, group=grp1, tooltip="Number of price rows per candle. Lower = bigger boxes. Try 4-6 for best visibility.")
 i_lookback     = input.int(40, "Bars to Show", minval=5, maxval=150, group=grp1)
 i_showDelta    = input.bool(true, "Show Delta", group=grp1)
 i_showImbal    = input.bool(true, "Show Imbalances", group=grp1)
-i_imbalPct     = input.int(200, "Imbalance %", minval=100, maxval=500, group=grp1, tooltip="300 = buy must be 3x sell (or vice versa) to flag")
+i_imbalPct     = input.int(200, "Imbalance %", minval=100, maxval=500, group=grp1, tooltip="200 = buy must be 2x sell (or vice versa) to flag")
+i_extend       = input.float(1.5, "Box Height Multiplier", minval=1.0, maxval=3.0, step=0.1, group=grp1, tooltip="Makes boxes taller. 1.0 = normal, 2.0 = double height")
 
 grp2 = "Colors"
-i_buyClr       = input.color(color.new(#26a69a, 30), "Buy Pressure", group=grp2)
-i_sellClr      = input.color(color.new(#ef5350, 30), "Sell Pressure", group=grp2)
+i_buyClr       = input.color(color.new(#26a69a, 10), "Buy Pressure", group=grp2)
+i_sellClr      = input.color(color.new(#ef5350, 10), "Sell Pressure", group=grp2)
 i_deltaUpClr   = input.color(#00e676, "Positive Delta", group=grp2)
 i_deltaDnClr   = input.color(#ff5252, "Negative Delta", group=grp2)
-i_bgClr        = input.color(color.new(#1e222d, 85), "Background", group=grp2)
 
 grp3 = "Display"
 i_showTable    = input.bool(true, "Show Summary Table", group=grp3)
 i_showPOC      = input.bool(true, "Show POC (Point of Control)", group=grp3)
-i_pocColor     = input.color(color.new(#ffeb3b, 40), "POC Color", group=grp3)
+i_pocColor     = input.color(color.new(#ffeb3b, 20), "POC Color", group=grp3)
+i_boxBorder    = input.int(3, "Box Border Width", minval=1, maxval=5, group=grp3, tooltip="Thicker borders = more visible boxes")
+i_labelSize    = input.string("normal", "Label Size", options=["small", "normal", "large"], group=grp3)
 
 // ═══════════════════════════════════════════════════════════════
 // CORE LOGIC: Estimate Buy/Sell Volume per Price Level
@@ -43,6 +45,12 @@ float totalBuyVol = volume * buyPct
 float totalSellVol = volume * (1 - buyPct)
 float totalDelta = totalBuyVol - totalSellVol
 
+// Label size selection
+sz = switch i_labelSize
+    "small"  => size.small
+    "normal" => size.normal
+    "large"  => size.large
+
 // ═══════════════════════════════════════════════════════════════
 // RENDER FOOTPRINT BOXES
 // ═══════════════════════════════════════════════════════════════
@@ -50,6 +58,8 @@ float totalDelta = totalBuyVol - totalSellVol
 if bar_index >= (last_bar_index - i_lookback) and barRange > 0 and volume > 0
     
     float lvlSize = barRange / i_levels
+    // Apply height multiplier to make boxes taller/more visible
+    float extendedLvlSize = lvlSize * i_extend
     float maxVol = 0.0
     int pocIdx = 0
     
@@ -88,48 +98,49 @@ if bar_index >= (last_bar_index - i_lookback) and barRange > 0 and volume > 0
             maxVol := lvlVol
             pocIdx := i
     
-    // Draw boxes for each level
+    // Draw boxes for each level — BIGGER and MORE VISIBLE
     for i = 0 to i_levels - 1
-        float lvlLow = low + i * lvlSize
-        float lvlHigh = lvlLow + lvlSize
+        float lvlMid = low + (i + 0.5) * lvlSize
+        float lvlLow = lvlMid - extendedLvlSize / 2
+        float lvlHigh = lvlMid + extendedLvlSize / 2
         float lBuy = array.get(arrBuy, i)
         float lSell = array.get(arrSell, i)
         float lTotal = lBuy + lSell
         
-        if lTotal > maxVol * 0.08
+        if lTotal > maxVol * 0.05
             // Determine dominant side
             bool buyDominant = lBuy >= lSell
             float strength = lTotal / maxVol
             
-            // Transparency based on volume strength (more volume = more opaque)
-            int transp = math.round(90 - strength * 65)
-            transp := math.max(20, math.min(90, transp))
+            // Transparency: stronger volume = more opaque (MUCH more visible now)
+            int transp = math.round(75 - strength * 65)
+            transp := math.max(5, math.min(75, transp))
             
-            // Background box showing total volume at this level
+            // Background box — THICK border, BOLD color
             color boxColor = buyDominant ? color.new(i_buyClr, transp) : color.new(i_sellClr, transp)
-            color borderColor = buyDominant ? color.new(i_buyClr, transp - 10) : color.new(i_sellClr, transp - 10)
+            color borderColor = buyDominant ? color.new(i_buyClr, math.max(0, transp - 20)) : color.new(i_sellClr, math.max(0, transp - 20))
             
             box.new(bar_index, lvlHigh, bar_index, lvlLow,
-                 bgcolor=boxColor, border_color=borderColor, border_width=1)
+                 bgcolor=boxColor, border_color=borderColor, border_width=i_boxBorder)
             
-            // Imbalance markers
-            if i_showImbal and lTotal > maxVol * 0.25
+            // Imbalance markers — BIG DOTS
+            if i_showImbal and lTotal > maxVol * 0.2
                 float ratio = math.max(lBuy, lSell) / math.max(math.min(lBuy, lSell), 0.0001)
                 if ratio >= (i_imbalPct / 100.0)
-                    float mid = (lvlLow + lvlHigh) / 2
                     color dotClr = lBuy > lSell ? i_deltaUpClr : i_deltaDnClr
-                    label.new(bar_index, mid, "●",
-                         style=label.style_none, textcolor=dotClr, size=size.tiny)
+                    // Use a larger label with a big symbol
+                    label.new(bar_index, lvlMid, "⬤",
+                         style=label.style_none, textcolor=dotClr, size=size.normal)
     
-    // POC line (Point of Control = highest volume level)
+    // POC (Point of Control) = highest volume level — THICK HIGHLIGHT
     if i_showPOC
-        float pocLow = low + pocIdx * lvlSize
-        float pocHigh = pocLow + lvlSize
-        float pocMid = (pocLow + pocHigh) / 2
+        float pocMid = low + (pocIdx + 0.5) * lvlSize
+        float pocLow = pocMid - extendedLvlSize / 2
+        float pocHigh = pocMid + extendedLvlSize / 2
         box.new(bar_index, pocHigh, bar_index, pocLow,
-             bgcolor=color.new(i_pocColor, 70), border_color=i_pocColor, border_width=2)
+             bgcolor=color.new(i_pocColor, 50), border_color=i_pocColor, border_width=i_boxBorder + 1)
     
-    // Delta label
+    // Delta label — BIGGER TEXT
     if i_showDelta
         string dStr = ""
         float d = totalDelta
@@ -144,39 +155,39 @@ if bar_index >= (last_bar_index - i_lookback) and barRange > 0 and volume > 0
         
         dStr := d >= 0 ? "+" + dStr : dStr
         
-        label.new(bar_index, low - lvlSize * 0.8, dStr,
+        label.new(bar_index, low - lvlSize * 1.2, dStr,
              style=label.style_none,
              textcolor=d >= 0 ? i_deltaUpClr : i_deltaDnClr,
-             size=size.tiny)
+             size=sz)
 
 // ═══════════════════════════════════════════════════════════════
-// SUMMARY TABLE
+// SUMMARY TABLE — LARGER TEXT
 // ═══════════════════════════════════════════════════════════════
 if barstate.islast and i_showTable
     var table infoTbl = table.new(position.top_right, 2, 6,
-         bgcolor=color.new(#0d1117, 5), border_width=1, border_color=color.new(#30363d, 30),
-         frame_width=1, frame_color=color.new(#30363d, 30))
+         bgcolor=color.new(#0d1117, 5), border_width=2, border_color=color.new(#30363d, 20),
+         frame_width=2, frame_color=color.new(#30363d, 20))
     
-    table.cell(infoTbl, 0, 0, "VOL FOOTPRINT", text_color=#00d4ff, text_size=size.small, text_halign=text.align_left)
-    table.cell(infoTbl, 1, 0, "", text_size=size.small)
+    table.cell(infoTbl, 0, 0, "VOL FOOTPRINT", text_color=#00d4ff, text_size=size.normal, text_halign=text.align_left)
+    table.cell(infoTbl, 1, 0, "", text_size=size.normal)
     
     // Current bar stats
-    table.cell(infoTbl, 0, 1, "Buy Vol", text_color=#6e7681, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(infoTbl, 0, 1, "Buy Vol", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
     string bvStr = volume > 1000 ? str.tostring(totalBuyVol/1000, "#.#") + "K" : str.tostring(totalBuyVol, "#.#")
-    table.cell(infoTbl, 1, 1, bvStr, text_color=#3fb950, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(infoTbl, 1, 1, bvStr, text_color=#3fb950, text_size=size.small, text_halign=text.align_right)
     
-    table.cell(infoTbl, 0, 2, "Sell Vol", text_color=#6e7681, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(infoTbl, 0, 2, "Sell Vol", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
     string svStr = volume > 1000 ? str.tostring(totalSellVol/1000, "#.#") + "K" : str.tostring(totalSellVol, "#.#")
-    table.cell(infoTbl, 1, 2, svStr, text_color=#f85149, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(infoTbl, 1, 2, svStr, text_color=#f85149, text_size=size.small, text_halign=text.align_right)
     
-    table.cell(infoTbl, 0, 3, "Delta", text_color=#6e7681, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(infoTbl, 0, 3, "Delta", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
     string tdStr = totalDelta >= 0 ? "+" : ""
     tdStr += volume > 1000 ? str.tostring(totalDelta/1000, "#.#") + "K" : str.tostring(totalDelta, "#.#")
-    table.cell(infoTbl, 1, 3, tdStr, text_color=totalDelta >= 0 ? #3fb950 : #f85149, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(infoTbl, 1, 3, tdStr, text_color=totalDelta >= 0 ? #3fb950 : #f85149, text_size=size.small, text_halign=text.align_right)
     
-    table.cell(infoTbl, 0, 4, "Buy %", text_color=#6e7681, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(infoTbl, 0, 4, "Buy %", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
     float bPct = volume > 0 ? buyPct * 100 : 50
-    table.cell(infoTbl, 1, 4, str.tostring(bPct, "#.#") + "%", text_color=bPct > 50 ? #3fb950 : #f85149, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(infoTbl, 1, 4, str.tostring(bPct, "#.#") + "%", text_color=bPct > 50 ? #3fb950 : #f85149, text_size=size.small, text_halign=text.align_right)
     
     // 10-bar cumulative delta
     float cumDelta10 = 0.0
@@ -186,10 +197,10 @@ if barstate.islast and i_showTable
         bp := math.max(0.1, math.min(0.9, bp))
         cumDelta10 += volume[i] * bp - volume[i] * (1 - bp)
     
-    table.cell(infoTbl, 0, 5, "10-Bar Δ", text_color=#6e7681, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(infoTbl, 0, 5, "10-Bar Δ", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
     string cdStr = cumDelta10 >= 0 ? "+" : ""
     cdStr += math.abs(cumDelta10) >= 1000 ? str.tostring(cumDelta10/1000, "#.#") + "K" : str.tostring(cumDelta10, "#")
-    table.cell(infoTbl, 1, 5, cdStr, text_color=cumDelta10 >= 0 ? #3fb950 : #f85149, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(infoTbl, 1, 5, cdStr, text_color=cumDelta10 >= 0 ? #3fb950 : #f85149, text_size=size.small, text_halign=text.align_right)
 
 // ═══════════════════════════════════════════════════════════════
 // ALERTS
