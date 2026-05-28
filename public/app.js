@@ -17,6 +17,7 @@ const S = {
   dragging: false, dragStartX: 0, dragStartScroll: 0,
   mouse: null,
   animSpeed: 0.12,
+  showFootprint: true, // Volume Footprint toggle
 };
 
 const TF_MS = {'1m':60000,'5m':300000,'15m':900000,'30m':1800000,'1h':3600000,'4h':14400000,'1D':86400000};
@@ -230,6 +231,90 @@ function render() {
     ctx.fillRect(x - bW/2, top, bW, h);
   });
 
+  // ══════════════════════════════════════════════════════════════
+  // VOLUME FOOTPRINT (Buy vs Sell pressure at each price level)
+  // Shows the bid/ask volume breakdown INSIDE each candle bar
+  // Green bars = aggressive buyers (lifting the ask)
+  // Red bars = aggressive sellers (hitting the bid)
+  // ══════════════════════════════════════════════════════════════
+  if (S.showFootprint) {
+    // Find max volume across all visible footprints for normalization
+    let maxFpVol = 0;
+    vis.forEach(c => {
+      if (!c.footprint) return;
+      Object.values(c.footprint).forEach(fp => {
+        const total = fp.buy + fp.sell;
+        if (total > maxFpVol) maxFpVol = total;
+      });
+    });
+
+    vis.forEach((c, i) => {
+      if (!c.footprint) return;
+      const x = i * cW + cW / 2;
+      const fpEntries = Object.entries(c.footprint).sort((a,b) => +b[0] - +a[0]); // high to low
+      if (fpEntries.length === 0) return;
+
+      // Calculate row height based on candle's price range and number of levels
+      const candleHighY = ((hi - c.high) / priceRange) * chartH;
+      const candleLowY = ((hi - c.low) / priceRange) * chartH;
+      const candlePixelH = candleLowY - candleHighY;
+      const rowH = Math.max(2, Math.min(12, candlePixelH / fpEntries.length));
+      
+      // Max bar width = half candle width (each side)
+      const maxBarW = cW * 0.42;
+
+      fpEntries.forEach(([priceStr, vol]) => {
+        const price = +priceStr;
+        if (price < lo || price > hi) return;
+        const y = ((hi - price) / priceRange) * chartH;
+        const total = vol.buy + vol.sell;
+        if (total === 0 || maxFpVol === 0) return;
+
+        const buyW = (vol.buy / maxFpVol) * maxBarW;
+        const sellW = (vol.sell / maxFpVol) * maxBarW;
+        const delta = vol.buy - vol.sell;
+
+        // Buy bar (left side of center, extends LEFT in green)
+        if (buyW > 0.5) {
+          const alpha = Math.min(0.9, 0.3 + (vol.buy / maxFpVol) * 0.6);
+          ctx.fillStyle = `rgba(38, 166, 154, ${alpha})`;
+          ctx.fillRect(x - buyW, y - rowH/2, buyW, rowH);
+        }
+
+        // Sell bar (right side of center, extends RIGHT in red)
+        if (sellW > 0.5) {
+          const alpha = Math.min(0.9, 0.3 + (vol.sell / maxFpVol) * 0.6);
+          ctx.fillStyle = `rgba(239, 83, 80, ${alpha})`;
+          ctx.fillRect(x, y - rowH/2, sellW, rowH);
+        }
+
+        // Delta indicator - small bright dot showing imbalance
+        if (total > maxFpVol * 0.15) {
+          const imbalance = Math.abs(delta) / total;
+          if (imbalance > 0.3) {
+            ctx.fillStyle = delta > 0 ? '#00ff88' : '#ff4466';
+            const dotSize = Math.min(3, rowH * 0.4);
+            ctx.beginPath();
+            ctx.arc(x, y, dotSize, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      });
+
+      // Delta summary text at bottom of candle (total buy - sell for the bar)
+      if (cW > 25) { // Only show text when zoomed in enough
+        const totalBuy = Object.values(c.footprint).reduce((a, v) => a + v.buy, 0);
+        const totalSell = Object.values(c.footprint).reduce((a, v) => a + v.sell, 0);
+        const barDelta = totalBuy - totalSell;
+        const deltaText = barDelta >= 0 ? `+${fmtVol(barDelta)}` : fmtVol(barDelta);
+        ctx.font = `bold ${Math.min(9, cW * 0.22)}px Consolas`;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = barDelta >= 0 ? '#3fb950' : '#f85149';
+        ctx.fillText(deltaText, x, candleLowY + 11);
+      }
+    });
+  }
+
   // ── Current price line ──
   if (S.currentPrice > lo && S.currentPrice < hi) {
     const py = ((hi - S.currentPrice) / priceRange) * chartH;
@@ -298,6 +383,19 @@ function render() {
       const txt = `O ${fmt(c.open)}  H ${fmt(c.high)}  L ${fmt(c.low)}  C ${fmt(c.close)}  V ${c.volume.toFixed(2)}`;
       ctx.fillStyle = green ? '#26a69a' : '#ef5350';
       ctx.fillText(txt, 8, 16);
+
+      // Footprint summary in tooltip
+      if (S.showFootprint && c.footprint) {
+        const totalBuy = Object.values(c.footprint).reduce((a, v) => a + v.buy, 0);
+        const totalSell = Object.values(c.footprint).reduce((a, v) => a + v.sell, 0);
+        const delta = totalBuy - totalSell;
+        const deltaStr = delta >= 0 ? `+${fmtVol(delta)}` : fmtVol(delta);
+        ctx.fillStyle = '#8b949e';
+        ctx.fillText(`Buy: ${fmtVol(totalBuy)}  Sell: ${fmtVol(totalSell)}  Delta: `, 8, 30);
+        const textW = ctx.measureText(`Buy: ${fmtVol(totalBuy)}  Sell: ${fmtVol(totalSell)}  Delta: `).width;
+        ctx.fillStyle = delta >= 0 ? '#3fb950' : '#f85149';
+        ctx.fillText(deltaStr, 8 + textW, 30);
+      }
     }
   }
 
@@ -448,6 +546,22 @@ function fmt(p){
   if(p>1000)return p.toFixed(2);
   if(p>1)return p.toFixed(4);
   return p.toFixed(6);
+}
+
+// Format volume for footprint display
+function fmtVol(v) {
+  const abs = Math.abs(v);
+  if (abs >= 1000) return (v/1000).toFixed(1) + 'k';
+  if (abs >= 1) return v.toFixed(2);
+  if (abs >= 0.01) return v.toFixed(3);
+  return v.toFixed(4);
+}
+
+// Footprint toggle
+function toggleFootprint() {
+  S.showFootprint = !S.showFootprint;
+  const btn = document.getElementById('fpBtn');
+  if (btn) btn.classList.toggle('active', S.showFootprint);
 }
 
 // START
