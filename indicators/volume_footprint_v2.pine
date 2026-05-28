@@ -1,0 +1,211 @@
+// This Pine Script(R) v5 indicator source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// Volume Footprint V2 - BIG & VISIBLE
+// Paste this directly into TradingView Pine Editor
+// Works on ANY market: Gold (XAUUSD), Forex, Crypto, Stocks, Indices
+
+//@version=5
+indicator("Volume Footprint V2", shorttitle="VFP", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════════════════════════
+grp1 = "Footprint Settings"
+i_levels       = input.int(5, "Price Levels", minval=3, maxval=20, group=grp1, tooltip="Number of price rows per candle. Lower = bigger boxes. Try 4-6 for best visibility.")
+i_lookback     = input.int(40, "Bars to Show", minval=5, maxval=150, group=grp1)
+i_showDelta    = input.bool(true, "Show Delta", group=grp1)
+i_showImbal    = input.bool(true, "Show Imbalances", group=grp1)
+i_imbalPct     = input.int(200, "Imbalance %", minval=100, maxval=500, group=grp1, tooltip="200 = buy must be 2x sell (or vice versa) to flag")
+i_extend       = input.float(1.5, "Box Height Multiplier", minval=1.0, maxval=3.0, step=0.1, group=grp1, tooltip="Makes boxes taller. 1.0 = normal, 2.0 = double height")
+
+grp2 = "Colors"
+i_buyClr       = input.color(color.new(#26a69a, 10), "Buy Pressure", group=grp2)
+i_sellClr      = input.color(color.new(#ef5350, 10), "Sell Pressure", group=grp2)
+i_deltaUpClr   = input.color(#00e676, "Positive Delta", group=grp2)
+i_deltaDnClr   = input.color(#ff5252, "Negative Delta", group=grp2)
+
+grp3 = "Display"
+i_showTable    = input.bool(true, "Show Summary Table", group=grp3)
+i_showPOC      = input.bool(true, "Show POC (Point of Control)", group=grp3)
+i_pocColor     = input.color(color.new(#ffeb3b, 20), "POC Color", group=grp3)
+i_boxBorder    = input.int(3, "Box Border Width", minval=1, maxval=5, group=grp3, tooltip="Thicker borders = more visible boxes")
+i_labelSize    = input.string("normal", "Label Size", options=["small", "normal", "large"], group=grp3)
+
+// ═══════════════════════════════════════════════════════════════
+// CORE LOGIC: Estimate Buy/Sell Volume per Price Level
+// ═══════════════════════════════════════════════════════════════
+
+// Estimate overall buy/sell ratio from price action
+// Close near high = mostly buying, close near low = mostly selling
+float barRange = high - low
+float buyPct = barRange > 0 ? (close - low) / barRange : 0.5
+buyPct := math.max(0.1, math.min(0.9, buyPct))
+
+float totalBuyVol = volume * buyPct
+float totalSellVol = volume * (1 - buyPct)
+float totalDelta = totalBuyVol - totalSellVol
+
+// Label size selection
+sz = switch i_labelSize
+    "small"  => size.small
+    "normal" => size.normal
+    "large"  => size.large
+
+// ═══════════════════════════════════════════════════════════════
+// RENDER FOOTPRINT BOXES
+// ═══════════════════════════════════════════════════════════════
+
+if bar_index >= (last_bar_index - i_lookback) and barRange > 0 and volume > 0
+    
+    float lvlSize = barRange / i_levels
+    // Apply height multiplier to make boxes taller/more visible
+    float extendedLvlSize = lvlSize * i_extend
+    float maxVol = 0.0
+    int pocIdx = 0
+    
+    // Arrays for level volumes
+    array<float> arrBuy = array.new_float(i_levels, 0.0)
+    array<float> arrSell = array.new_float(i_levels, 0.0)
+    
+    // Distribute volume across levels using weighted distribution
+    float sumW = 0.0
+    for i = 0 to i_levels - 1
+        float mid = low + (i + 0.5) * lvlSize
+        float distNorm = math.abs(mid - close) / barRange
+        float w = math.exp(-distNorm * 2.0) + 0.2
+        sumW += w
+    
+    for i = 0 to i_levels - 1
+        float mid = low + (i + 0.5) * lvlSize
+        float distNorm = math.abs(mid - close) / barRange
+        float w = (math.exp(-distNorm * 2.0) + 0.2) / sumW
+        
+        float lvlVol = volume * w
+        
+        // Buy/sell split: more buying at bottom in bullish, more selling at top
+        float pos = (i + 0.5) / i_levels  // 0=bottom, 1=top
+        float lvlBuyPct = close >= open ?
+             math.max(0.15, 0.7 - pos * 0.5) :
+             math.max(0.15, 0.3 + pos * 0.4)
+        
+        float lBuy = lvlVol * lvlBuyPct
+        float lSell = lvlVol * (1 - lvlBuyPct)
+        
+        array.set(arrBuy, i, lBuy)
+        array.set(arrSell, i, lSell)
+        
+        if lvlVol > maxVol
+            maxVol := lvlVol
+            pocIdx := i
+    
+    // Draw boxes for each level — BIGGER and MORE VISIBLE
+    for i = 0 to i_levels - 1
+        float lvlMid = low + (i + 0.5) * lvlSize
+        float lvlLow = lvlMid - extendedLvlSize / 2
+        float lvlHigh = lvlMid + extendedLvlSize / 2
+        float lBuy = array.get(arrBuy, i)
+        float lSell = array.get(arrSell, i)
+        float lTotal = lBuy + lSell
+        
+        if lTotal > maxVol * 0.05
+            // Determine dominant side
+            bool buyDominant = lBuy >= lSell
+            float strength = lTotal / maxVol
+            
+            // Transparency: stronger volume = more opaque (MUCH more visible now)
+            int transp = math.round(75 - strength * 65)
+            transp := math.max(5, math.min(75, transp))
+            
+            // Background box — THICK border, BOLD color
+            color boxColor = buyDominant ? color.new(i_buyClr, transp) : color.new(i_sellClr, transp)
+            color borderColor = buyDominant ? color.new(i_buyClr, math.max(0, transp - 20)) : color.new(i_sellClr, math.max(0, transp - 20))
+            
+            box.new(bar_index, lvlHigh, bar_index, lvlLow,
+                 bgcolor=boxColor, border_color=borderColor, border_width=i_boxBorder)
+            
+            // Imbalance markers — BIG DOTS
+            if i_showImbal and lTotal > maxVol * 0.2
+                float ratio = math.max(lBuy, lSell) / math.max(math.min(lBuy, lSell), 0.0001)
+                if ratio >= (i_imbalPct / 100.0)
+                    color dotClr = lBuy > lSell ? i_deltaUpClr : i_deltaDnClr
+                    // Use a larger label with a big symbol
+                    label.new(bar_index, lvlMid, "⬤",
+                         style=label.style_none, textcolor=dotClr, size=size.normal)
+    
+    // POC (Point of Control) = highest volume level — THICK HIGHLIGHT
+    if i_showPOC
+        float pocMid = low + (pocIdx + 0.5) * lvlSize
+        float pocLow = pocMid - extendedLvlSize / 2
+        float pocHigh = pocMid + extendedLvlSize / 2
+        box.new(bar_index, pocHigh, bar_index, pocLow,
+             bgcolor=color.new(i_pocColor, 50), border_color=i_pocColor, border_width=i_boxBorder + 1)
+    
+    // Delta label — BIGGER TEXT
+    if i_showDelta
+        string dStr = ""
+        float d = totalDelta
+        if math.abs(d) >= 1000000
+            dStr := str.tostring(d / 1000000, "#.#") + "M"
+        else if math.abs(d) >= 1000
+            dStr := str.tostring(d / 1000, "#.#") + "K"
+        else if math.abs(d) >= 1
+            dStr := str.tostring(d, "#")
+        else
+            dStr := str.tostring(d, "#.##")
+        
+        dStr := d >= 0 ? "+" + dStr : dStr
+        
+        label.new(bar_index, low - lvlSize * 1.2, dStr,
+             style=label.style_none,
+             textcolor=d >= 0 ? i_deltaUpClr : i_deltaDnClr,
+             size=sz)
+
+// ═══════════════════════════════════════════════════════════════
+// SUMMARY TABLE — LARGER TEXT
+// ═══════════════════════════════════════════════════════════════
+if barstate.islast and i_showTable
+    var table infoTbl = table.new(position.top_right, 2, 6,
+         bgcolor=color.new(#0d1117, 5), border_width=2, border_color=color.new(#30363d, 20),
+         frame_width=2, frame_color=color.new(#30363d, 20))
+    
+    table.cell(infoTbl, 0, 0, "VOL FOOTPRINT", text_color=#00d4ff, text_size=size.normal, text_halign=text.align_left)
+    table.cell(infoTbl, 1, 0, "", text_size=size.normal)
+    
+    // Current bar stats
+    table.cell(infoTbl, 0, 1, "Buy Vol", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
+    string bvStr = volume > 1000 ? str.tostring(totalBuyVol/1000, "#.#") + "K" : str.tostring(totalBuyVol, "#.#")
+    table.cell(infoTbl, 1, 1, bvStr, text_color=#3fb950, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(infoTbl, 0, 2, "Sell Vol", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
+    string svStr = volume > 1000 ? str.tostring(totalSellVol/1000, "#.#") + "K" : str.tostring(totalSellVol, "#.#")
+    table.cell(infoTbl, 1, 2, svStr, text_color=#f85149, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(infoTbl, 0, 3, "Delta", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
+    string tdStr = totalDelta >= 0 ? "+" : ""
+    tdStr += volume > 1000 ? str.tostring(totalDelta/1000, "#.#") + "K" : str.tostring(totalDelta, "#.#")
+    table.cell(infoTbl, 1, 3, tdStr, text_color=totalDelta >= 0 ? #3fb950 : #f85149, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(infoTbl, 0, 4, "Buy %", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
+    float bPct = volume > 0 ? buyPct * 100 : 50
+    table.cell(infoTbl, 1, 4, str.tostring(bPct, "#.#") + "%", text_color=bPct > 50 ? #3fb950 : #f85149, text_size=size.small, text_halign=text.align_right)
+    
+    // 10-bar cumulative delta
+    float cumDelta10 = 0.0
+    for i = 0 to 9
+        float r = (high[i] - low[i])
+        float bp = r > 0 ? (close[i] - low[i]) / r : 0.5
+        bp := math.max(0.1, math.min(0.9, bp))
+        cumDelta10 += volume[i] * bp - volume[i] * (1 - bp)
+    
+    table.cell(infoTbl, 0, 5, "10-Bar Δ", text_color=#8b949e, text_size=size.small, text_halign=text.align_left)
+    string cdStr = cumDelta10 >= 0 ? "+" : ""
+    cdStr += math.abs(cumDelta10) >= 1000 ? str.tostring(cumDelta10/1000, "#.#") + "K" : str.tostring(cumDelta10, "#")
+    table.cell(infoTbl, 1, 5, cdStr, text_color=cumDelta10 >= 0 ? #3fb950 : #f85149, text_size=size.small, text_halign=text.align_right)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(totalDelta > 0 and totalDelta[1] < 0, "Delta Flip Bullish", "Volume delta flipped positive")
+alertcondition(totalDelta < 0 and totalDelta[1] > 0, "Delta Flip Bearish", "Volume delta flipped negative")
+alertcondition(buyPct > 0.75, "Strong Buying (>75%)", "Strong buying pressure detected")
+alertcondition(buyPct < 0.25, "Strong Selling (>75%)", "Strong selling pressure detected")

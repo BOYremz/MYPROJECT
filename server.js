@@ -67,20 +67,76 @@ function fetchJSON(url) {
   });
 }
 
+// Generate synthetic footprint data for historical candles
+// Distributes buy/sell volume across price levels within the candle range
+function generateSyntheticFootprint(open, high, low, close, buyVol, sellVol, tf) {
+  const footprint = {};
+  let tick;
+  const price = (open + close) / 2;
+  if (price > 10000) tick = 10;
+  else if (price > 1000) tick = 1;
+  else if (price > 100) tick = 0.5;
+  else if (price > 10) tick = 0.1;
+  else tick = 0.01;
+  if (tf === '1h' || tf === '4h') tick *= 2;
+  if (tf === '1D') tick *= 5;
+
+  const roundLow = Math.floor(low / tick) * tick;
+  const roundHigh = Math.ceil(high / tick) * tick;
+  const levels = Math.max(1, Math.round((roundHigh - roundLow) / tick));
+  
+  // Distribute volume with a bell-curve-like distribution centered near close
+  const center = close;
+  const totalLevels = Math.min(levels, 30); // Cap at 30 levels for performance
+  const stepSize = (roundHigh - roundLow) / totalLevels;
+  
+  let totalWeight = 0;
+  const weights = [];
+  for (let i = 0; i < totalLevels; i++) {
+    const levelPrice = roundLow + i * stepSize;
+    const dist = Math.abs(levelPrice - center) / (roundHigh - roundLow || 1);
+    const w = Math.exp(-dist * 3) + 0.1; // More volume near close
+    weights.push(w);
+    totalWeight += w;
+  }
+  
+  for (let i = 0; i < totalLevels; i++) {
+    const levelPrice = Math.round((roundLow + i * stepSize) / tick) * tick;
+    const ratio = weights[i] / totalWeight;
+    // Bias: if close > open (bullish), more buying near bottom, selling near top
+    const isBullish = close >= open;
+    const posInRange = i / totalLevels;
+    let buyRatio = isBullish ? (0.6 - posInRange * 0.3) : (0.3 + posInRange * 0.3);
+    buyRatio = Math.max(0.2, Math.min(0.8, buyRatio));
+    
+    const levelVol = (buyVol + sellVol) * ratio;
+    footprint[levelPrice] = {
+      buy: +(levelVol * buyRatio).toFixed(4),
+      sell: +(levelVol * (1 - buyRatio)).toFixed(4)
+    };
+  }
+  return footprint;
+}
+
 async function loadHistoricalCandles(symbol, tf, limit = 200) {
   try {
     const interval = TIMEFRAMES[tf].binance;
     const url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
     const data = await fetchJSON(url);
     if (Array.isArray(data)) {
-      candles[tf] = data.map(k => ({
-        openTime: k[0], closeTime: k[6],
-        open: parseFloat(k[1]), high: parseFloat(k[2]),
-        low: parseFloat(k[3]), close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
-        buyVolume: parseFloat(k[9]) || parseFloat(k[5]) * 0.5,
-        sellVolume: parseFloat(k[5]) - (parseFloat(k[9]) || parseFloat(k[5]) * 0.5),
-      }));
+      candles[tf] = data.map(k => {
+        const open = parseFloat(k[1]), high = parseFloat(k[2]);
+        const low = parseFloat(k[3]), close = parseFloat(k[4]);
+        const volume = parseFloat(k[5]);
+        const buyVolume = parseFloat(k[9]) || volume * 0.5;
+        const sellVolume = volume - buyVolume;
+        // Generate synthetic footprint from OHLCV for historical candles
+        const footprint = generateSyntheticFootprint(open, high, low, close, buyVolume, sellVolume, tf);
+        return {
+          openTime: k[0], closeTime: k[6],
+          open, high, low, close, volume, buyVolume, sellVolume, footprint
+        };
+      });
       currentPrice = candles[tf][candles[tf].length-1]?.close || 0;
       console.log(`[REST] Loaded ${candles[tf].length} ${tf} candles`);
     }
@@ -195,7 +251,10 @@ function updateCandle(price, qty, ts, isBuy) {
     const arr = candles[tf];
     let last = arr[arr.length-1];
     if (!last || last.openTime !== openTime) {
-      arr.push({ openTime, closeTime: openTime+info.ms, open: price, high: price, low: price, close: price, volume: qty, buyVolume: isBuy?qty:0, sellVolume: isBuy?0:qty });
+      const footprint = {};
+      const roundedPrice = roundToTick(price, tf);
+      footprint[roundedPrice] = { buy: isBuy ? qty : 0, sell: isBuy ? 0 : qty };
+      arr.push({ openTime, closeTime: openTime+info.ms, open: price, high: price, low: price, close: price, volume: qty, buyVolume: isBuy?qty:0, sellVolume: isBuy?0:qty, footprint });
       if (arr.length > 500) candles[tf] = arr.slice(-500);
     } else {
       last.high = Math.max(last.high, price);
@@ -203,8 +262,31 @@ function updateCandle(price, qty, ts, isBuy) {
       last.close = price;
       last.volume += qty;
       if (isBuy) last.buyVolume += qty; else last.sellVolume += qty;
+      // Update footprint data
+      if (!last.footprint) last.footprint = {};
+      const roundedPrice = roundToTick(price, tf);
+      if (!last.footprint[roundedPrice]) last.footprint[roundedPrice] = { buy: 0, sell: 0 };
+      if (isBuy) last.footprint[roundedPrice].buy += qty;
+      else last.footprint[roundedPrice].sell += qty;
     }
   });
+}
+
+// Round price to appropriate tick size for footprint grouping
+function roundToTick(price, tf) {
+  // Adaptive tick size based on price magnitude and timeframe
+  let tick;
+  if (price > 10000) tick = 10;        // BTC - $10 levels
+  else if (price > 1000) tick = 1;      // Gold/PAXG - $1 levels
+  else if (price > 100) tick = 0.5;     // SOL/BNB
+  else if (price > 10) tick = 0.1;      // ETH etc
+  else tick = 0.01;                     // Forex pairs
+  
+  // Wider ticks for larger timeframes
+  if (tf === '1h' || tf === '4h') tick *= 2;
+  if (tf === '1D') tick *= 5;
+  
+  return Math.round(price / tick) * tick;
 }
 
 function detectEvents() {
